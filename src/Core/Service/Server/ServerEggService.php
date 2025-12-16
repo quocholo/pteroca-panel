@@ -2,44 +2,43 @@
 
 namespace App\Core\Service\Server;
 
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
-class ServerEggService
+readonly class ServerEggService
 {
     public function __construct(
-        private readonly PterodactylService $pterodactylService,
-        private readonly TranslatorInterface $translator,
+        private PterodactylApplicationService $pterodactylApplicationService,
+        private TranslatorInterface           $translator,
     )
     {
     }
 
     public function prepareEggsConfiguration(int $pterodactylServerId): string
     {
-        $pterodactylServer = $this->pterodactylService
-            ->getApi()
-            ->servers
-            ->get($pterodactylServerId, ['include' => 'variables'])
-            ->toArray();
+        $pterodactylServer = $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->servers()
+            ->getServer($pterodactylServerId, ['include' => 'variables']);
 
-        $pterodactylServerVariables = $pterodactylServer['relationships']['variables']->toArray();
+        $pterodactylServerVariables = $pterodactylServer->get('relationships')['variables'];
         $preparedVariables = [];
         foreach ($pterodactylServerVariables as $variable) {
-            $preparedVariables[$variable['attributes']['id']] = [
-                'value' => $variable['attributes']['default_value'],
-                'user_viewable' => $variable['attributes']['user_viewable'],
-                'user_editable' => $variable['attributes']['user_editable'],
+            $preparedVariables[$variable->get('id')] = [
+                'value' => $variable->get('default_value'),
+                'user_viewable' => $variable->get('user_viewable'),
+                'user_editable' => $variable->get('user_editable'),
             ];
         }
 
         $serverEggsConfiguration = [
-            $pterodactylServer['egg'] => [
+            $pterodactylServer->get('egg') => [
                 'options' => [
                     'startup' => [
-                        'value' => $pterodactylServer['container']['startup_command'],
+                        'value' => $pterodactylServer->get('container')['startup_command'],
                     ],
                     'docker_image' => [
-                        'value' => $pterodactylServer['container']['image'],
+                        'value' => $pterodactylServer->get('container')['image'],
                     ],
                 ],
                 'variables' => $preparedVariables,
@@ -51,19 +50,22 @@ class ServerEggService
 
     public function prepareEggsDataByNest(int $nestId): array
     {
-        $eggs = $this->pterodactylService
-            ->getApi()
-            ->nest_eggs
-            ->all($nestId, ['include' => 'variables'])
-            ->toArray();
+        $eggs = $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->nestEggs()
+            ->all($nestId, ['include' => 'variables']);
+
 
         $translations = $this->getEggsTranslations();
         $choices = [];
         $loadedEggs = [];
 
         foreach ($eggs as $egg) {
-            $choices[$egg->name] = $egg->id;
-            $loadedEggs[$egg->id] = $egg;
+            $eggId = $egg->get('id');
+            $eggName = $egg->get('name');
+
+            $choices[$eggName] = $eggId;
+            $loadedEggs[$eggId] = $egg->toArray();
         }
 
         return [

@@ -2,6 +2,7 @@
 
 namespace App\Core\Twig;
 
+use Exception;
 use Twig\TwigFilter;
 use Twig\TwigFunction;
 use App\Core\Enum\SettingEnum;
@@ -14,6 +15,7 @@ use App\Core\Enum\EmailVerificationValueEnum;
 use App\Core\Service\Template\TemplateManager;
 use Symfony\Component\Routing\RouterInterface;
 use App\Core\Service\System\SystemVersionService;
+use App\Core\Service\Plugin\PluginAssetManager;
 use App\Core\Service\Pterodactyl\PterodactylRedirectService;
 
 class AppExtension extends AbstractExtension
@@ -27,6 +29,7 @@ class AppExtension extends AbstractExtension
         private readonly Packages $packages,
         private readonly RouterInterface $router,
         private readonly PterodactylRedirectService $pterodactylRedirectService,
+        private readonly PluginAssetManager $pluginAssetManager,
     ) {}
 
     public function getFunctions(): array
@@ -46,6 +49,7 @@ class AppExtension extends AbstractExtension
             new TwigFunction('is_pterodactyl_sso_enabled', [$this, 'isPterodactylSSOEnabled']),
             new TwigFunction('template_asset', [$this, 'templateAsset']),
             new TwigFunction('get_current_template_options', [$this, 'getCurrentTemplateOptions']),
+            new TwigFunction('plugin_asset', [$this, 'pluginAsset']),
         ];
     }
 
@@ -56,11 +60,14 @@ class AppExtension extends AbstractExtension
         ];
     }
 
+    /**
+     * @throws Exception
+     */
     public function getCurrency(): string
     {
         $currency = $this->settingService->getSetting(SettingEnum::INTERNAL_CURRENCY_NAME->value);
         if (empty($currency)) {
-            throw new \Exception('Internal currency is not set');
+            throw new Exception('Internal currency is not set');
         }
         return $currency;
     }
@@ -68,16 +75,8 @@ class AppExtension extends AbstractExtension
     public function getDefaultThemeColors(): array
     {
         $themeSettings = [
-            SettingEnum::DEFAULT_THEME_PRIMARY_COLOR->value,
-            SettingEnum::DEFAULT_THEME_SECONDARY_COLOR->value,
-            SettingEnum::DEFAULT_THEME_BACKGROUND_COLOR->value,
-            SettingEnum::DEFAULT_THEME_LINK_COLOR->value,
-            SettingEnum::DEFAULT_THEME_LINK_HOVER_COLOR->value,
-            SettingEnum::DEFAULT_THEME_DARK_PRIMARY_COLOR->value,
-            SettingEnum::DEFAULT_THEME_DARK_SECONDARY_COLOR->value,
-            SettingEnum::DEFAULT_THEME_DARK_BACKGROUND_COLOR->value,
-            SettingEnum::DEFAULT_THEME_DARK_LINK_COLOR->value,
-            SettingEnum::DEFAULT_THEME_DARK_LINK_HOVER_COLOR->value,
+            SettingEnum::DEFAULT_THEME_LIGHT_MODE_COLOR->value,
+            SettingEnum::DEFAULT_THEME_DARK_MODE_COLOR->value,
         ];
 
         $settings = [];
@@ -167,5 +166,10 @@ class AppExtension extends AbstractExtension
     public function getCurrentTemplateOptions(): TemplateOptionsDTO
     {
         return $this->templateManager->getCurrentTemplateOptions();
+    }
+
+    public function pluginAsset(string $pluginName, string $path): string
+    {
+        return $this->pluginAssetManager->getAssetUrl($pluginName, $path);
     }
 }

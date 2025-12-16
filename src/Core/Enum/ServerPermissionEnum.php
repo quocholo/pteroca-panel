@@ -2,6 +2,9 @@
 
 namespace App\Core\Enum;
 
+use App\Core\DTO\Collection\ServerPermissionCollection;
+use ValueError;
+
 enum ServerPermissionEnum: string
 {
     case CONTROL_CONSOLE = 'control.console';
@@ -123,18 +126,18 @@ enum ServerPermissionEnum: string
         ];
     }
     
-    public static function fromArray(array $permissions): \App\Core\DTO\Collection\ServerPermissionCollection
+    public static function fromArray(array $permissions): ServerPermissionCollection
     {
         $result = [];
         
         foreach ($permissions as $permission) {
             try {
                 $result[] = self::from($permission);
-            } catch (\ValueError $e) {
+            } catch (ValueError) {
                 // Ignore invalid permissions
             }
         }
         
-        return new \App\Core\DTO\Collection\ServerPermissionCollection($result);
+        return new ServerPermissionCollection($result);
     }
 }

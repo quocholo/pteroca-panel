@@ -4,14 +4,16 @@ namespace App\Core\Controller\Panel;
 
 use App\Core\Entity\Product;
 use App\Core\Enum\CrudTemplateContextEnum;
+use App\Core\Enum\PermissionEnum;
 use App\Core\Enum\SettingEnum;
-use App\Core\Enum\UserRoleEnum;
 use App\Core\Form\ProductPriceDynamicFormType;
 use App\Core\Form\ProductPriceFixedFormType;
 use App\Core\Form\ProductPriceSlotFormType;
 use App\Core\Service\Crud\PanelCrudService;
 use App\Core\Service\Crud\ProductCopyService;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Product\NestEggsCacheService;
+use App\Core\Service\Product\ProductHealthStatusFormatter;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use App\Core\Service\SettingService;
 use App\Core\Trait\ExperimentalFeatureMessageTrait;
 use App\Core\Trait\ProductCrudControllerTrait;
@@ -26,6 +28,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\BooleanField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\ChoiceField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\CollectionField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\DateTimeField;
+use EasyCorp\Bundle\EasyAdminBundle\Field\Field;
 use EasyCorp\Bundle\EasyAdminBundle\Field\FormField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\HiddenField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\ImageField;
@@ -44,14 +47,16 @@ class ProductCrudController extends AbstractPanelController
 
     public function __construct(
         PanelCrudService $panelCrudService,
-        private readonly PterodactylService $pterodactylService,
+        private readonly RequestStack $requestStack,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
         private readonly SettingService $settingService,
         private readonly TranslatorInterface $translator,
-        private readonly RequestStack $requestStack,
         private readonly ProductCopyService $productCopyService,
         private readonly AdminUrlGenerator $adminUrlGenerator,
+        private readonly NestEggsCacheService $nestEggsCacheService,
+        private readonly ProductHealthStatusFormatter $productHealthStatusFormatter,
     ) {
-        parent::__construct($panelCrudService);
+        parent::__construct($panelCrudService, $requestStack);
     }
 
     public static function getEntityFqcn(): string
@@ -59,8 +64,22 @@ class ProductCrudController extends AbstractPanelController
         return Product::class;
     }
 
+    protected function getPermissionMapping(): array
+    {
+        return [
+            Action::INDEX  => PermissionEnum::ACCESS_PRODUCTS->value,
+            Action::DETAIL => PermissionEnum::VIEW_PRODUCT->value,
+            Action::NEW    => PermissionEnum::CREATE_PRODUCT->value,
+            Action::EDIT   => PermissionEnum::EDIT_PRODUCT->value,
+            Action::DELETE => PermissionEnum::DELETE_PRODUCT->value,
+            'copyProduct' => PermissionEnum::COPY_PRODUCT->value,
+        ];
+    }
+
     public function configureFields(string $pageName): iterable
     {
+        Product::registerVirtualField('healthStatus');
+        
         $nests = $this->getNestsChoices();
         $uploadDirectory = str_replace(
             '/',
@@ -74,13 +93,14 @@ class ProductCrudController extends AbstractPanelController
             FormField::addTab($this->translator->trans('pteroca.crud.product.details'))
                 ->setIcon('fa fa-info-circle'),
             TextField::new('name', $this->translator->trans('pteroca.crud.product.name'))
-                ->setColumns(7),
-            TextareaField::new('description', $this->translator->trans('pteroca.crud.product.description'))
-                ->setColumns(10),
-            BooleanField::new('isActive', $this->translator->trans('pteroca.crud.product.is_active'))
-                ->setColumns(12),
+                ->setColumns(6),
             AssociationField::new('category', $this->translator->trans('pteroca.crud.product.category'))
-                ->setColumns(5),
+                ->setColumns(6),
+            TextareaField::new('description', $this->translator->trans('pteroca.crud.product.description'))
+                ->setColumns(6)
+                ->hideOnIndex(),
+            BooleanField::new('isActive', $this->translator->trans('pteroca.crud.product.is_active'))
+                ->setColumns(6),
             FormField::addRow(),
             ImageField::new('imagePath', $this->translator->trans('pteroca.crud.product.image'))
                 ->setBasePath($this->getParameter('products_base_path'))
@@ -88,14 +108,14 @@ class ProductCrudController extends AbstractPanelController
                 ->setUploadedFileNamePattern('[slug]-[timestamp].[extension]')
                 ->setRequired(false)
                 ->setHelp($this->translator->trans('pteroca.crud.product.image_help'))
-                ->setColumns(5),
+                ->setColumns(6),
             ImageField::new('bannerPath', $this->translator->trans('pteroca.crud.product.banner'))
                 ->setBasePath($this->getParameter('products_base_path'))
                 ->setUploadDir($uploadDirectory)
                 ->setUploadedFileNamePattern('[slug]-[timestamp].[extension]')
                 ->setRequired(false)
                 ->setHelp($this->translator->trans('pteroca.crud.product.banner_help'))
-                ->setColumns(5),
+                ->setColumns(6),
             $this->getProductHelpPanel(),
 
             FormField::addTab($this->translator->trans('pteroca.crud.product.server_resources'))
@@ -124,10 +144,12 @@ class ProductCrudController extends AbstractPanelController
             FormField::addRow(),
             NumberField::new('dbCount', $this->translator->trans('pteroca.crud.product.db_count'))
                 ->setHelp($this->translator->trans('pteroca.crud.product.db_count_hint'))
-                ->setColumns(4),
+                ->setColumns(4)
+                ->hideOnIndex(),
             NumberField::new('backups', $this->translator->trans('pteroca.crud.product.backups'))
                 ->setHelp($this->translator->trans('pteroca.crud.product.backups_hint'))
-                ->setColumns(4),
+                ->setColumns(4)
+                ->hideOnIndex(),
             NumberField::new('ports', $this->translator->trans('pteroca.crud.product.ports'))
                 ->setHelp($this->translator->trans('pteroca.crud.product.ports_hint'))
                 ->setColumns(4),
@@ -198,7 +220,13 @@ class ProductCrudController extends AbstractPanelController
                 ->setRequired(true)
                 ->setFormTypeOption('attr', ['class' => 'egg-selector'])
                 ->setColumns(12),
-
+            Field::new('healthStatus', $this->translator->trans('pteroca.crud.product.health_status'))
+                ->onlyOnIndex()
+                ->setColumns(2)
+                ->setSortable(false)
+                ->formatValue(fn($value, Product $entity) =>
+                    $this->productHealthStatusFormatter->getHealthBadgeHtml($entity, $this->translator)
+                ),
             DateTimeField::new('createdAt', $this->translator->trans('pteroca.crud.product.created_at'))->onlyOnDetail(),
             DateTimeField::new('updatedAt', $this->translator->trans('pteroca.crud.product.updated_at'))->onlyOnDetail(),
             DateTimeField::new('deletedAt', $this->translator->trans('pteroca.crud.product.deleted_at'))->onlyOnDetail(),
@@ -218,19 +246,32 @@ class ProductCrudController extends AbstractPanelController
         $copyAction = Action::new('copyProduct', $this->translator->trans('pteroca.crud.product.copy'))
             ->linkToCrudAction('copyProduct')
             ->setCssClass('action-copy-product')
-            ->displayIf(fn (Product $entity) => empty($entity->getDeletedAt()));
+            ->displayIf(fn (Product $entity) =>
+                $this->getUser()?->hasPermission(PermissionEnum::COPY_PRODUCT) &&
+                empty($entity->getDeletedAt())
+            );
 
-        return $actions
+        $actions = $actions
             ->update(Crud::PAGE_INDEX, Action::NEW, fn (Action $action) => $action->setLabel($this->translator->trans('pteroca.crud.product.add')))
             ->update(Crud::PAGE_NEW, Action::SAVE_AND_RETURN, fn (Action $action) => $action->setLabel($this->translator->trans('pteroca.crud.product.add')))
             ->update(Crud::PAGE_EDIT, Action::SAVE_AND_RETURN, fn (Action $action) => $action->setLabel($this->translator->trans('pteroca.crud.product.save')))
-            ->update(Crud::PAGE_INDEX, Action::EDIT, fn (Action $action) => $action->displayIf(fn (Product $entity) => empty($entity->getDeletedAt())))
-            ->update(Crud::PAGE_INDEX, Action::DELETE, fn (Action $action) => $action->displayIf(fn (Product $entity) => empty($entity->getDeletedAt())))
+            ->update(Crud::PAGE_INDEX, Action::EDIT, fn (Action $action) => $action->displayIf(
+                fn (Product $entity) =>
+                    $this->getUser()?->hasPermission(PermissionEnum::EDIT_PRODUCT) &&
+                    empty($entity->getDeletedAt())
+            ))
+            ->update(Crud::PAGE_INDEX, Action::DELETE, fn (Action $action) => $action->displayIf(
+                fn (Product $entity) =>
+                    $this->getUser()?->hasPermission(PermissionEnum::DELETE_PRODUCT) &&
+                    empty($entity->getDeletedAt())
+            ))
             ->add(Crud::PAGE_INDEX, Action::DETAIL)
             ->add(Crud::PAGE_INDEX, $copyAction)
             ->reorder(Crud::PAGE_INDEX, [Action::EDIT, Action::DETAIL, 'copyProduct', Action::DELETE])
             ->remove(Crud::PAGE_NEW, Action::SAVE_AND_ADD_ANOTHER)
             ->remove(Crud::PAGE_EDIT, Action::SAVE_AND_CONTINUE);
+
+        return parent::configureActions($actions);
     }
 
     public function configureCrud(Crud $crud): Crud
@@ -241,7 +282,6 @@ class ProductCrudController extends AbstractPanelController
             ->setEntityLabelInSingular($this->translator->trans('pteroca.crud.product.product'))
             ->setEntityLabelInPlural($this->translator->trans('pteroca.crud.product.products'))
             ->setDefaultSort(['createdAt' => 'DESC'])
-            ->setEntityPermission(UserRoleEnum::ROLE_ADMIN->name)
         ;
 
         return parent::configureCrud($crud);
@@ -278,6 +318,8 @@ class ProductCrudController extends AbstractPanelController
             $entityInstance->setEggsConfiguration(json_encode($this->getEggsConfigurationFromRequest()));
             $entityInstance->setCreatedAtValue();
             $entityInstance->setUpdatedAtValue();
+
+            $this->validateProductEggs($entityInstance);
         }
 
         parent::persistEntity($entityManager, $entityInstance);
@@ -288,6 +330,8 @@ class ProductCrudController extends AbstractPanelController
         if ($entityInstance instanceof Product) {
             $entityInstance->setEggsConfiguration(json_encode($this->getEggsConfigurationFromRequest()));
             $entityInstance->setUpdatedAtValue();
+
+            $this->validateProductEggs($entityInstance);
         }
 
         parent::updateEntity($entityManager, $entityInstance);
@@ -306,17 +350,35 @@ class ProductCrudController extends AbstractPanelController
     {
         /** @var Product $originalProduct */
         $originalProduct = $context->getEntity()->getInstance();
-        
-        $copiedProduct = $this->productCopyService->copyProduct($originalProduct);
-        
+
+        $user = $this->getUser();
+        $request = $this->requestStack->getCurrentRequest();
+        $eventContext = $this->buildMinimalEventContext($request);
+
+        $copiedProduct = $this->productCopyService->copyProduct(
+            $originalProduct,
+            $user->getId(),
+            $eventContext
+        );
+
         $this->addFlash('success', $this->translator->trans('pteroca.crud.product.copy_success'));
-        
+
         $url = $this->adminUrlGenerator
             ->setController(self::class)
             ->setAction(Action::EDIT)
             ->setEntityId($copiedProduct->getId())
             ->generateUrl();
-            
+
         return new RedirectResponse($url);
+    }
+
+    private function validateProductEggs(Product $product): void
+    {
+        $this->nestEggsCacheService->validateProductEggs(
+            $product,
+            $this->translator->trans('pteroca.crud.product.no_eggs_selected'),
+            $this->translator->trans('pteroca.crud.product.invalid_eggs_selected'),
+            $this->translator->trans('pteroca.crud.product.egg_validation_error')
+        );
     }
 }

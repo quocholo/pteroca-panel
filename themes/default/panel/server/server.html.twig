@@ -1,22 +1,45 @@
 {% extends '@EasyAdmin/page/content.html.twig' %}
 
+{% block head_stylesheets %}
+    {{ parent() }}
+    {% for css in tabAssets.stylesheets %}
+        <link rel="stylesheet" href="{{ template_asset(css) }}">
+    {% endfor %}
+{% endblock %}
+
 {% block title %}
     | {{ serverData.pterodactylServer.name ?? 'pteroca.server.title'|trans }} #{{ server.pterodactylServerIdentifier }}
 {% endblock %}
 
-{% block content_title %}
-    {{ serverData.pterodactylServer.name ?? 'pteroca.server.title'|trans }} #{{ server.pterodactylServerIdentifier }}
-{% endblock %}
+{% block content_title %}{% endblock %}
 
-{% block page_actions %}
-    <a class="btn btn-secondary" href="{{ path('panel') }}">
-        {{ 'pteroca.system.back'|trans }}
-    </a>
-{% endblock %}
+{% block page_actions %}{% endblock %}
+
+{% block content_header_wrapper %}{% endblock %}
 
 {% block main %}
+    <div class="mt-4">
+        <!-- Header Section -->
+        <div class="row">
+            <div class="col-12">
+                <div class="dashboard-header rounded-3 p-4 mb-4">
+                    <div class="d-flex align-items-center">
+                        <div class="bg-primary rounded-circle me-3">
+                            <i class="fas fa-server p-3 text-white"></i>
+                        </div>
+                        <div>
+                            <h4 class="mb-1 fw-bold">{{ serverData.pterodactylServer.name ?? 'pteroca.server.title'|trans }} #{{ server.pterodactylServerIdentifier }}</h4>
+                            {% if serverData.pterodactylServer.description is defined and serverData.pterodactylServer.description %}
+                                <p class="text-muted mb-0">{{ serverData.pterodactylServer.description }}</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
     {% if isAdminView and app.user.email != server.user.email %}
-        <div class="container mt-4 mb-4">
+        <div class="container">
             <div class="alert alert-warning" role="alert">
                 <i class="fas fa-exclamation-triangle"></i>
                 {{ 'pteroca.server.admin_view_warning'|trans }}
@@ -24,7 +47,7 @@
         </div>
     {% endif %}
     {% if server.isSuspended %}
-        <div class="container mt-4 mb-4">
+        <div class="container">
             <div class="alert alert-danger" role="alert">
                 <i class="fas fa-exclamation-triangle"></i>
                 {% if server.expiresAt|date("Y-m-d H:i:s") < "now"|date("Y-m-d H:i:s") %}
@@ -41,38 +64,19 @@
     {% elseif serverData.isSuspended %}
         {% include 'panel/server/server_suspended.html.twig' %}
     {% else %}
-        <div class="container mt-4">
+        <div class="p-2">
             {% include 'panel/server/tabs/navigation.html.twig' %}
             <div class="tab-content">
-                {% include 'panel/server/tabs/console/console.html.twig' %}
-                {% if (serverData.hasConfigurableOptions or serverData.hasConfigurableVariables) and hasServerPermission(serverData.serverPermissions, 'startup.read') %}
-                    {% include 'panel/server/tabs/startup/startup.html.twig' %}
-                {% endif %}
-                {% if server.serverProduct.dbCount and hasServerPermission(serverData.serverPermissions, 'database.read') %}
-                    {% include 'panel/server/tabs/databases/databases.html.twig' %}
-                {% endif %}
-                {% if server.serverProduct.backups and hasServerPermission(serverData.serverPermissions, 'backup.read') %}
-                    {% include 'panel/server/tabs/backups/backups.html.twig' %}
-                {% endif %}
-                {% if hasServerPermission(serverData.serverPermissions, 'allocation.read') %}
-                    {% include 'panel/server/tabs/network/network.html.twig' %}
-                {% endif %}
-                {% if hasServerPermission(serverData.serverPermissions, 'user.read') %}
-                    {% include 'panel/server/tabs/users/users.html.twig' %}
-                {% endif %}
-                {% if server.serverProduct.schedules > 0 and hasServerPermission(serverData.serverPermissions, 'schedule.read') %}
-                    {% include 'panel/server/tabs/schedules/schedules.html.twig' %}
-                {% endif %}
-                {% include 'panel/server/tabs/settings/settings.html.twig' %}
-                {% if hasServerPermission(serverData.serverPermissions, 'activity.read') %}
-                    {% include 'panel/server/tabs/activity/activity.html.twig' %}
-                {% endif %}
+                {% for tab in visibleTabs %}
+                    {% include tab.template %}
+                {% endfor %}
             </div>
         </div>
     {% endif %}
 {% endblock %}
 
 {% block body_javascript %}
+    {{ parent() }}
     <script>
         function sendRequest(endpointUrl, method = 'GET', data = null) {
             let requestObject = {
@@ -90,4 +94,7 @@
             return fetch(endpointUrl, requestObject)
         }
     </script>
+    {% for js in tabAssets.javascripts %}
+        <script src="{{ template_asset(js) }}"></script>
+    {% endfor %}
 {% endblock %}

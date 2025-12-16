@@ -4,7 +4,6 @@ namespace App\Core\Controller\Panel;
 
 use App\Core\Entity\Category;
 use App\Core\Enum\CrudTemplateContextEnum;
-use App\Core\Enum\UserRoleEnum;
 use App\Core\Service\Crud\PanelCrudService;
 use Doctrine\ORM\EntityManagerInterface;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
@@ -16,6 +15,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\NumberField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextareaField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
 use Symfony\Component\HttpFoundation\File\File;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
 
@@ -23,9 +23,10 @@ class CategoryCrudController extends AbstractPanelController
 {
     public function __construct(
         PanelCrudService $panelCrudService,
+        RequestStack $requestStack,
         private readonly TranslatorInterface $translator,
     ) {
-        parent::__construct($panelCrudService);
+        parent::__construct($panelCrudService, $requestStack);
     }
 
     public static function getEntityFqcn(): string
@@ -43,24 +44,29 @@ class CategoryCrudController extends AbstractPanelController
 
         return [
             NumberField::new('id', 'ID')->onlyOnIndex(),
-            TextField::new('name', $this->translator->trans('pteroca.crud.category.name')),
-            TextareaField::new('description', $this->translator->trans('pteroca.crud.category.description')),
+            TextField::new('name', $this->translator->trans('pteroca.crud.category.name'))
+                ->setColumns(6),
             ImageField::new('imagePath', $this->translator->trans('pteroca.crud.category.image'))
                 ->setBasePath($this->getParameter('categories_base_path'))
                 ->setUploadDir($uploadDirectory)
                 ->setUploadedFileNamePattern('[slug]-[timestamp].[extension]')
                 ->setRequired(false),
+            TextareaField::new('description', $this->translator->trans('pteroca.crud.category.description'))
+                ->setColumns(6),
+
         ];
     }
 
     public function configureActions(Actions $actions): Actions
     {
-        return $actions
+        $actions = $actions
             ->update(Crud::PAGE_INDEX, Action::NEW, fn (Action $action) => $action->setLabel($this->translator->trans('pteroca.crud.category.add')))
             ->update(Crud::PAGE_NEW, Action::SAVE_AND_RETURN, fn (Action $action) => $action->setLabel($this->translator->trans('pteroca.crud.category.add')))
             ->update(Crud::PAGE_EDIT, Action::SAVE_AND_RETURN, fn (Action $action) => $action->setLabel($this->translator->trans('pteroca.crud.category.save')))
             ->remove(Crud::PAGE_NEW, Action::SAVE_AND_ADD_ANOTHER)
             ->remove(Crud::PAGE_EDIT, Action::SAVE_AND_CONTINUE);
+
+        return parent::configureActions($actions);
     }
 
     public function configureCrud(Crud $crud): Crud
@@ -70,7 +76,6 @@ class CategoryCrudController extends AbstractPanelController
         $crud
             ->setEntityLabelInSingular($this->translator->trans('pteroca.crud.category.category'))
             ->setEntityLabelInPlural($this->translator->trans('pteroca.crud.category.categories'))
-            ->setEntityPermission(UserRoleEnum::ROLE_ADMIN->name)
             ;
 
         return parent::configureCrud($crud);

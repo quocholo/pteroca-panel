@@ -8,27 +8,30 @@ use App\Core\Controller\Panel\Setting\PaymentSettingCrudController;
 use App\Core\Controller\Panel\Setting\PterodactylSettingCrudController;
 use App\Core\Controller\Panel\Setting\SecuritySettingCrudController;
 use App\Core\Controller\Panel\Setting\ThemeSettingCrudController;
-use App\Core\Entity\Category;
-use App\Core\Entity\EmailLog;
-use App\Core\Entity\Log;
 use App\Core\Entity\Panel\UserAccount;
-use App\Core\Entity\Panel\UserPayment;
-use App\Core\Entity\Payment;
-use App\Core\Entity\Product;
-use App\Core\Entity\Server;
-use App\Core\Entity\ServerLog;
-use App\Core\Entity\User;
-use App\Core\Entity\Voucher;
-use App\Core\Entity\VoucherUsage;
+use App\Core\Service\Menu\MenuBuilder;
+use App\Core\Enum\PermissionEnum;
 use App\Core\Enum\SettingContextEnum;
 use App\Core\Enum\SettingEnum;
-use App\Core\Enum\UserRoleEnum;
+use App\Core\Enum\ViewNameEnum;
+use App\Core\Enum\WidgetContext;
+use App\Core\Event\Dashboard\DashboardAccessedEvent;
+use App\Core\Event\Dashboard\DashboardDataLoadedEvent;
+use App\Core\Event\Menu\MenuItemsCollectedEvent;
+use App\Core\Event\Widget\WidgetsCollectedEvent;
+use App\Core\Service\Widget\WidgetRegistry;
+use App\Core\Widget\Dashboard\BalanceWidget;
+use App\Core\Widget\Dashboard\ServersWidget;
+use App\Core\Widget\Dashboard\MotdWidget;
+use App\Core\Widget\Dashboard\ActivityWidget;
+use App\Core\Widget\Dashboard\QuickActionsWidget;
 use App\Core\Repository\ServerRepository;
 use App\Core\Service\Logs\LogService;
 use App\Core\Service\Server\ServerService;
 use App\Core\Service\SettingService;
 use App\Core\Service\System\SystemVersionService;
 use App\Core\Service\Template\TemplateManager;
+use App\Core\Trait\EventContextTrait;
 use App\Core\Trait\GetUserTrait;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Assets;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Dashboard;
@@ -36,6 +39,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Config\MenuItem;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Option\ColorScheme;
 use EasyCorp\Bundle\EasyAdminBundle\Config\UserMenu;
 use EasyCorp\Bundle\EasyAdminBundle\Controller\AbstractDashboardController;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\Security\Core\User\UserInterface;
@@ -44,6 +48,7 @@ use Symfony\Contracts\Translation\TranslatorInterface;
 class DashboardController extends AbstractDashboardController
 {
     use GetUserTrait;
+    use EventContextTrait;
 
     public function __construct(
         private readonly TranslatorInterface $translator,
@@ -53,23 +58,88 @@ class DashboardController extends AbstractDashboardController
         private readonly SystemVersionService $systemVersionService,
         private readonly TemplateManager $templateManager,
         private readonly ServerService $serverService,
+        private readonly RequestStack $requestStack,
+        private readonly BalanceWidget $balanceWidget,
+        private readonly ServersWidget $serversWidget,
+        private readonly MotdWidget $motdWidget,
+        private readonly ActivityWidget $activityWidget,
+        private readonly QuickActionsWidget $quickActionsWidget,
+        private readonly MenuBuilder $menuBuilder,
+        private readonly WidgetRegistry $widgetRegistry,
     ) {}
 
     #[Route('/panel', name: 'panel')]
     public function index(): Response
     {
-        $user = $this->getUser();
-        $pterodactylPanelUrl = $this->settingService->getSetting(SettingEnum::PTERODACTYL_PANEL_URL->value);
+        $this->denyAccessUnlessGranted(PermissionEnum::ACCESS_DASHBOARD->value);
 
-        return $this->render('panel/dashboard/dashboard.html.twig', [
-            'servers' => $this->serverService->getServersWithAccess($user),
+        $user = $this->getUser();
+        $request = $this->requestStack->getCurrentRequest();
+
+        $this->dispatchDataEvent(
+            DashboardAccessedEvent::class,
+            $request,
+            [$user->getRoles()]
+        );
+
+        // === Widget Registry System ===
+        // Register builtin widgets (injected as dependencies)
+        $this->registerBuiltinWidgets($this->widgetRegistry);
+
+        // Dispatch event for plugins to register custom widgets
+        $contextData = ['user' => $user];
+        $widgetEvent = new WidgetsCollectedEvent(
+            $this->widgetRegistry,
+            WidgetContext::DASHBOARD,
+            $contextData
+        );
+        $this->dispatchEvent($widgetEvent);
+        // === End Widget Registry System ===
+
+        $pterodactylPanelUrl = $this->settingService->getSetting(SettingEnum::PTERODACTYL_PANEL_URL->value);
+        $servers = $this->serverService->getServersWithAccess($user);
+        $logs = $this->logService->getLogsByUser($user, 5);
+        $motdEnabled = $this->settingService->getSetting(SettingEnum::CUSTOMER_MOTD_ENABLED->value);
+        $motdTitle = $this->settingService->getSetting(SettingEnum::CUSTOMER_MOTD_TITLE->value);
+        $motdMessage = $this->settingService->getSetting(SettingEnum::CUSTOMER_MOTD_MESSAGE->value);
+
+        $this->dispatchDataEvent(
+            DashboardDataLoadedEvent::class,
+            $request,
+            [count($servers), count($logs), (bool)$motdEnabled]
+        );
+
+        $viewData = [
+            'widgetRegistry' => $this->widgetRegistry,
+            'widgetContext' => WidgetContext::DASHBOARD,
+            'contextData' => $contextData,
+            'servers' => $servers,
             'user' => $user,
-            'logs' => $this->logService->getLogsByUser($user, 5),
-            'motdEnabled' => $this->settingService->getSetting(SettingEnum::CUSTOMER_MOTD_ENABLED->value),
-            'motdTitle' => $this->settingService->getSetting(SettingEnum::CUSTOMER_MOTD_TITLE->value),
-            'motdMessage' => $this->settingService->getSetting(SettingEnum::CUSTOMER_MOTD_MESSAGE->value),
+            'logs' => $logs,
+            'motdEnabled' => $motdEnabled,
+            'motdTitle' => $motdTitle,
+            'motdMessage' => $motdMessage,
             'pterodactylPanelUrl' => $pterodactylPanelUrl,
-        ]);
+        ];
+
+        $viewEvent = $this->prepareViewDataEvent(ViewNameEnum::DASHBOARD, $viewData, $request);
+
+        return $this->render('panel/dashboard/dashboard.html.twig', $viewEvent->getViewData());
+    }
+
+    /**
+     * Register builtin (core) dashboard widgets.
+     *
+     * @param WidgetRegistry $registry
+     * @return void
+     */
+    private function registerBuiltinWidgets(WidgetRegistry $registry): void
+    {
+        $registry->registerWidget($this->quickActionsWidget);
+        $registry->registerWidget($this->balanceWidget);
+        $registry->registerWidget($this->serversWidget);
+        $registry->registerWidget($this->motdWidget);
+        $registry->registerWidget($this->activityWidget);
     }
 
     public function configureDashboard(): Dashboard
@@ -99,54 +169,44 @@ class DashboardController extends AbstractDashboardController
 
     public function configureMenuItems(): iterable
     {
-        yield MenuItem::section($this->translator->trans('pteroca.crud.menu.menu'));
-        yield MenuItem::linkToDashboard($this->translator->trans('pteroca.crud.menu.dashboard'), 'fa fa-home');
-        yield MenuItem::linkToRoute($this->translator->trans('pteroca.crud.menu.my_servers'), 'fa fa-server', 'servers');
-        yield MenuItem::linkToRoute($this->translator->trans('pteroca.crud.menu.shop'), 'fa fa-shopping-cart', 'store');
-        yield MenuItem::linkToRoute($this->translator->trans('pteroca.crud.menu.wallet'), 'fa fa-wallet', 'recharge_balance');
-        yield MenuItem::subMenu($this->translator->trans('pteroca.crud.menu.my_account'), 'fa fa-user')->setSubItems([
-            MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.payments'), 'fa fa-money', UserPayment::class),
-            MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.account_settings'), 'fa fa-user-cog', UserAccount::class),
-        ]);
+        // Build menu structure using MenuBuilder service
+        $menuItems = $this->menuBuilder->buildMenuStructure(
+            fn(SettingContextEnum $context) => $this->generateSettingsUrl($context)
+        );
 
-        if ($this->isGranted(UserRoleEnum::ROLE_ADMIN->name)) {
-            yield MenuItem::section($this->translator->trans('pteroca.crud.menu.administration'));
-            yield MenuItem::linkToRoute($this->translator->trans('pteroca.crud.menu.overview'), 'fa fa-gauge', 'admin_overview');
-            yield MenuItem::subMenu($this->translator->trans('pteroca.crud.menu.shop'), 'fa fa-shopping-cart')->setSubItems([
-                MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.categories'), 'fa fa-list', Category::class),
-                MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.products'), 'fa fa-sliders-h', Product::class),
-            ]);
-            yield MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.servers'), 'fa fa-server', Server::class);
-            yield MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.payments'), 'fa fa-money', Payment::class);
-            yield MenuItem::subMenu($this->translator->trans('pteroca.crud.menu.logs'), 'fa fa-bars-staggered')->setSubItems([
-                MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.logs'), 'fa fa-bars-staggered', Log::class),
-                MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.email_logs'), 'fa fa-envelope', EmailLog::class),
-                MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.server_logs'), 'fa fa-bars', ServerLog::class),
-            ]);
-            yield MenuItem::subMenu($this->translator->trans('pteroca.crud.menu.settings'), 'fa fa-cogs')->setSubItems([
-                MenuItem::linkToUrl($this->translator->trans('pteroca.crud.menu.general'), 'fa fa-cog', $this->generateSettingsUrl(SettingContextEnum::GENERAL)),
-                MenuItem::linkToUrl($this->translator->trans('pteroca.crud.menu.pterodactyl'), 'fa fa-network-wired', $this->generateSettingsUrl(SettingContextEnum::PTERODACTYL)),
-                MenuItem::linkToUrl($this->translator->trans('pteroca.crud.menu.security'), 'fa fa-shield-halved', $this->generateSettingsUrl(SettingContextEnum::SECURITY)),
-                MenuItem::linkToUrl($this->translator->trans('pteroca.crud.menu.payment_gateways'), 'fa fa-hand-holding-dollar', $this->generateSettingsUrl(SettingContextEnum::PAYMENT)),
-                MenuItem::linkToUrl($this->translator->trans('pteroca.crud.menu.email'), 'fa fa-envelope', $this->generateSettingsUrl(SettingContextEnum::EMAIL)),
-                MenuItem::linkToUrl($this->translator->trans('pteroca.crud.menu.appearance'), 'fa fa-brush', $this->generateSettingsUrl(SettingContextEnum::THEME)),
-            ]);
-            yield MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.users'), 'fa fa-user', User::class);
-            yield MenuItem::subMenu($this->translator->trans('pteroca.crud.menu.vouchers'), 'fa fa-gifts')->setSubItems([
-                MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.vouchers'), 'fa fa-gift', Voucher::class),
-                MenuItem::linkToCrud($this->translator->trans('pteroca.crud.menu.voucher_usages'), 'fa fa-list', VoucherUsage::class),
-            ]);
-        }
-
-        yield MenuItem::section();
+        // Add conditional footer items (phpMyAdmin, if enabled)
         if ($this->settingService->getSetting(SettingEnum::SHOW_PHPMYADMIN_URL->value)) {
-            yield MenuItem::linkToUrl(
+            $menuItems['footer'][] = MenuItem::linkToUrl(
                 $this->translator->trans('pteroca.crud.menu.phpmyadmin'),
                 'fa fa-database',
                 $this->settingService->getSetting(SettingEnum::PHPMYADMIN_URL->value),
             )->setLinkTarget('_blank');
         }
-        yield MenuItem::linkToLogout($this->translator->trans('pteroca.crud.menu.logout'), 'fa fa-sign-out-alt');
+
+        $menuItems['footer'][] = MenuItem::linkToLogout(
+            $this->translator->trans('pteroca.crud.menu.logout'),
+            'fa fa-sign-out-alt'
+        );
+
+        // Dispatch event for plugins to add/modify menu items
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->buildMinimalEventContext($request) : [];
+
+        $event = new MenuItemsCollectedEvent(
+            $this->getUser(),
+            $menuItems,
+            $context
+        );
+
+        $event = $this->dispatchEvent($event);
+        $menuItems = $event->getMenuItems();
+
+        // Yield all items in order: main -> admin -> footer
+        foreach ($menuItems as $items) {
+            foreach ($items as $item) {
+                yield $item;
+            }
+        }
     }
 
     public function configureAssets(): Assets
@@ -165,7 +225,7 @@ class DashboardController extends AbstractDashboardController
         $menuItems = $userMenu->getAsDto()->getItems();
 
         $logoutAction = end($menuItems);
-        $logoutAction->getAsDto()->setIcon('fa-sign-out-alt');
+        $logoutAction->setIcon('fa-sign-out-alt');
 
         $userMenu->addMenuItems([
             MenuItem::linkToCrud(

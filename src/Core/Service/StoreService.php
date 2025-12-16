@@ -12,22 +12,26 @@ use App\Core\Enum\ProductPriceTypeEnum;
 use App\Core\Repository\CategoryRepository;
 use App\Core\Repository\ProductRepository;
 use App\Core\Service\Product\ProductPriceCalculatorService;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use App\Core\Service\Server\ServerSlotConfigurationService;
+use Exception;
+use JsonException;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
-class StoreService
+readonly class StoreService
 {
     public function __construct(
-        private readonly CategoryRepository $categoryRepository,
-        private readonly ProductRepository $productRepository,
-        private readonly PterodactylService $pterodactylService,
-        private readonly TranslatorInterface $translator,
-        private readonly ProductPriceCalculatorService $productPriceCalculatorService,
-        private readonly ServerSlotConfigurationService $serverSlotConfigurationService,
-        private readonly string $categoriesBasePath,
-        private readonly string $productsBasePath,
+        private CategoryRepository             $categoryRepository,
+        private ProductRepository              $productRepository,
+        private PterodactylApplicationService  $pterodactylApplicationService,
+        private TranslatorInterface            $translator,
+        private ProductPriceCalculatorService  $productPriceCalculatorService,
+        private ServerSlotConfigurationService $serverSlotConfigurationService,
+        private LoggerInterface                $logger,
+        private string                         $categoriesBasePath,
+        private string                         $productsBasePath,
     ) {}
 
     public function getCategories(): array
@@ -89,22 +93,38 @@ class StoreService
 
     public function getProductEggs(Product $product): array
     {
-        $eggs = $this->pterodactylService
-            ->getApi()
-            ->nest_eggs
+        $eggs = $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->nestEggs()
             ->all($product->getNest())
             ->toArray();
 
-        return array_filter($eggs, fn($egg) => in_array($egg->id, $product->getEggs()));
+        $apiEggIds = array_column($eggs, 'id');
+        $storedEggIds = $product->getEggs();
+
+        $missingEggIds = array_diff($storedEggIds, $apiEggIds);
+
+        if (!empty($missingEggIds)) {
+            $this->logger->warning('Product has eggs that are no longer available in Pterodactyl', [
+                'product_id' => $product->getId(),
+                'product_name' => $product->getName(),
+                'missing_egg_ids' => $missingEggIds,
+                'missing_count' => count($missingEggIds),
+                'total_stored_eggs' => count($storedEggIds),
+                'available_eggs' => count($apiEggIds),
+            ]);
+        }
+
+        return array_filter($eggs, fn($egg) => in_array($egg['id'], $product->getEggs()));
     }
 
     public function productHasNodeWithResources(Product $product): bool
     {
         foreach ($product->getNodes() as $node) {
-            $node = $this->pterodactylService
-                ->getApi()
-                ->nodes
-                ->get($node)
+            $node = $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->nodes()
+                ->getNode($node)
                 ->toArray();
 
             if ($this->checkNodeResources($product->getMemory(), $product->getDiskSpace(), $node)) {
@@ -149,6 +169,17 @@ class StoreService
             throw new NotFoundHttpException($this->translator->trans('pteroca.store.egg_not_found'));
         }
 
+        if (!empty($eggId) && empty($server)) {
+            $validEggs = $this->getProductEggs($product);
+            $validEggIds = array_column($validEggs, 'id');
+
+            if (!in_array($eggId, $validEggIds)) {
+                throw new NotFoundHttpException(
+                    $this->translator->trans('pteroca.store.egg_not_found')
+                );
+            }
+        }
+
         $productPrices = $product->getPrices()->toArray();
         $price = array_filter($productPrices, fn($price) => $price->getId() === $priceId);
         if (empty($price)) {
@@ -169,7 +200,7 @@ class StoreService
                     try {
                         $eggsConfiguration = json_decode($eggsConfigurationJson, true, 512, JSON_THROW_ON_ERROR);
                         $maxSlots = $this->serverSlotConfigurationService->getMaxSlotsFromEggConfiguration($eggsConfiguration, $eggId) ?? $maxSlots;
-                    } catch (\JsonException) {
+                    } catch (JsonException) {
                         // If JSON is invalid, use default maxSlots
                     }
                 }
@@ -183,12 +214,15 @@ class StoreService
         }
     }
 
+    /**
+     * @throws Exception
+     */
     public function validateUserBalanceByPrice(UserInterface $user, ProductPriceInterface $selectedPrice, ?int $slots = null): void
     {
         $finalPrice = $this->productPriceCalculatorService->calculateFinalPrice($selectedPrice, $slots);
         
         if ($finalPrice > $user->getBalance()) {
-            throw new \Exception($this->translator->trans('pteroca.store.not_enough_funds'));
+            throw new Exception($this->translator->trans('pteroca.store.not_enough_funds'));
         }
     }
 }

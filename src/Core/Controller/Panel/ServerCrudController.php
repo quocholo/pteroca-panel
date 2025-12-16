@@ -4,7 +4,6 @@ namespace App\Core\Controller\Panel;
 
 use App\Core\Entity\Server;
 use App\Core\Enum\CrudTemplateContextEnum;
-use App\Core\Enum\UserRoleEnum;
 use App\Core\Service\Crud\PanelCrudService;
 use App\Core\Service\Pterodactyl\PterodactylRedirectService;
 use App\Core\Service\Server\DeleteServerService;
@@ -25,6 +24,8 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\IntegerField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\NumberField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
 use Symfony\Contracts\Translation\TranslatorInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
+use App\Core\Enum\PermissionEnum;
 
 class ServerCrudController extends AbstractPanelController
 {
@@ -33,13 +34,14 @@ class ServerCrudController extends AbstractPanelController
 
     public function __construct(
         PanelCrudService $panelCrudService,
+        private readonly RequestStack $requestStack,
         private readonly UpdateServerService $updateServerService,
         private readonly DeleteServerService $deleteServerService,
         private readonly SettingService $settingService,
         private readonly TranslatorInterface $translator,
         private readonly PterodactylRedirectService $pterodactylRedirectService,
     ) {
-        parent::__construct($panelCrudService);
+        parent::__construct($panelCrudService, $requestStack);
     }
 
     public static function getEntityFqcn(): string
@@ -54,23 +56,28 @@ class ServerCrudController extends AbstractPanelController
                 ->hideOnForm(),
             IntegerField::new('pterodactylServerId', $this->translator->trans('pteroca.crud.server.pterodactyl_server_id'))
                 ->setDisabled()
-                ->onlyOnForms(),
+                ->onlyOnForms()
+                ->setColumns(4),
             TextField::new('pterodactylServerIdentifier', $this->translator->trans('pteroca.crud.server.pterodactyl_server_identifier'))
-                ->setDisabled(),
+                ->setDisabled()
+                ->setColumns(4),
             TextField::new('name', $this->translator->trans('pteroca.crud.server.name'))
                 ->formatValue(function ($value, Server $entity) {
                     return $value ?: $entity->getServerProduct()->getName();
                 }),
             AssociationField::new('serverProduct', $this->translator->trans('pteroca.crud.server.product_server_build'))
-                ->setDisabled(),
+                ->setDisabled()
+                ->setColumns(4),
             AssociationField::new('user', $this->translator->trans('pteroca.crud.server.user'))
                 ->setQueryBuilder(function ($queryBuilder) {
                     return $queryBuilder
                         ->andWhere('entity.deletedAt IS NULL');
-                }),
+                })
+                ->setColumns(4),
+            DateTimeField::new('expiresAt', $this->translator->trans('pteroca.crud.server.expires_at')),
             BooleanField::new('autoRenewal', $this->translator->trans('pteroca.crud.server.auto_renewal'))
-                ->hideOnIndex(),
-
+                ->hideOnIndex()
+                ->setColumns(4),
             NumberField::new('serverProduct.diskSpace', sprintf('%s (MB)', $this->translator->trans('pteroca.crud.product.disk_space')))
                 ->onlyOnDetail(),
             NumberField::new('serverProduct.memory', sprintf('%s (MB)', $this->translator->trans('pteroca.crud.product.memory')))
@@ -87,24 +94,26 @@ class ServerCrudController extends AbstractPanelController
                 ->onlyOnIndex(),
             NumberField::new('serverProduct.ports', $this->translator->trans('pteroca.crud.product.ports'))
                 ->onlyOnIndex(),
-
-            DateTimeField::new('expiresAt', $this->translator->trans('pteroca.crud.server.expires_at')),
-            BooleanField::new('isSuspended', $this->translator->trans('pteroca.crud.server.is_suspended')),
-
-            DateTimeField::new('createdAt', $this->translator->trans('pteroca.crud.server.created_at'))->onlyOnDetail(),
-            DateTimeField::new('deletedAt', $this->translator->trans('pteroca.crud.server.deleted_at'))->onlyOnDetail(),
+            BooleanField::new('isSuspended', $this->translator->trans('pteroca.crud.server.is_suspended'))
+                ->setColumns(4),
+            DateTimeField::new('createdAt', $this->translator->trans('pteroca.crud.server.created_at'))
+                ->onlyOnDetail(),
+            DateTimeField::new('deletedAt', $this->translator->trans('pteroca.crud.server.deleted_at'))
+                ->onlyOnDetail(),
         ];
     }
 
     public function configureActions(Actions $actions): Actions
     {
-        return $actions
+        $actions = $actions
             ->remove(Crud::PAGE_INDEX, Action::NEW)
             ->update(
                 Crud::PAGE_INDEX,
                 Action::DELETE,
                 fn (Action $action) => $action->displayIf(
-                    fn (Server $entity) => empty($entity->getDeletedAt())
+                    fn (Server $entity) =>
+                        $this->getUser()?->hasPermission(PermissionEnum::DELETE_SERVER) &&
+                        empty($entity->getDeletedAt())
                 )
             )->update(
                 Crud::PAGE_EDIT,
@@ -122,8 +131,9 @@ class ServerCrudController extends AbstractPanelController
             ->add(Crud::PAGE_INDEX, $this->getShowServerLogsAction())
             ->add(Crud::PAGE_EDIT, $this->getShowServerLogsAction())
             ->add(Crud::PAGE_DETAIL, $this->getManageServerAction())
-            ->add(Crud::PAGE_EDIT, $this->getManageServerAction())
-            ;
+            ->add(Crud::PAGE_EDIT, $this->getManageServerAction());
+
+        return parent::configureActions($actions);
     }
 
     public function configureCrud(Crud $crud): Crud
@@ -133,7 +143,6 @@ class ServerCrudController extends AbstractPanelController
         $crud
             ->setEntityLabelInSingular($this->translator->trans('pteroca.crud.server.server'))
             ->setEntityLabelInPlural($this->translator->trans('pteroca.crud.server.servers'))
-            ->setEntityPermission(UserRoleEnum::ROLE_ADMIN->name)
             ->setDefaultSort(['createdAt' => 'DESC']);
 
         return parent::configureCrud($crud);
@@ -192,6 +201,18 @@ class ServerCrudController extends AbstractPanelController
                 ]
             )
         )->displayIf(function (Server $entity) use ($action) {
+            // Check permission based on action type
+            $permissionMap = [
+                Action::DETAIL => PermissionEnum::VIEW_SERVER_PRODUCT,
+                Action::EDIT => PermissionEnum::EDIT_SERVER_PRODUCT,
+            ];
+            $permission = $permissionMap[$action] ?? null;
+
+            if ($permission && !$this->getUser()?->hasPermission($permission)) {
+                return false;
+            }
+
+            // Check entity state
             if ($action !== Action::DETAIL) {
                 return empty($entity->getDeletedAt());
             }

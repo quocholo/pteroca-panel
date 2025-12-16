@@ -10,6 +10,7 @@ use App\Core\Repository\SettingOptionRepository;
 use App\Core\Service\Crud\PanelCrudService;
 use App\Core\Service\LocaleService;
 use App\Core\Service\SettingService;
+use App\Core\Service\SettingTypeMapperService;
 use App\Core\Service\Template\TemplateManager;
 use App\Core\Service\Template\TemplateService;
 use Doctrine\ORM\QueryBuilder;
@@ -36,6 +37,7 @@ class ThemeSettingCrudController extends AbstractSettingCrudController
         SettingOptionRepository $settingOptionRepository,
         SettingService $settingService,
         LocaleService $localeService,
+        SettingTypeMapperService $typeMapper,
         private readonly TemplateService $templateService,
         private readonly TemplateManager $templateManager,
         private readonly TranslatorInterface $translator,
@@ -48,7 +50,8 @@ class ThemeSettingCrudController extends AbstractSettingCrudController
             $settingRepository,
             $settingOptionRepository,
             $settingService,
-            $localeService
+            $localeService,
+            $typeMapper
         );
 
         $this->currentTemplateOptions = $this->templateManager->getCurrentTemplateOptions();
@@ -56,11 +59,9 @@ class ThemeSettingCrudController extends AbstractSettingCrudController
             || $settingService->getSetting(SettingEnum::THEME_DISABLE_DARK_MODE->value);
     }
 
-    public function configureCrud(Crud $crud): Crud
+    protected function getSettingContext(): SettingContextEnum
     {
-        $this->context = SettingContextEnum::THEME;
-
-        return parent::configureCrud($crud);
+        return SettingContextEnum::THEME;
     }
 
     public function configureFields(string $pageName): iterable
@@ -97,24 +98,12 @@ class ThemeSettingCrudController extends AbstractSettingCrudController
 
         if (!$this->currentTemplateOptions->isSupportDarkMode()) {
             $hiddenSettings[] = SettingEnum::THEME_DISABLE_DARK_MODE->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_PRIMARY_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_SECONDARY_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_BACKGROUND_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_LINK_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_LINK_HOVER_COLOR->value;
+            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_MODE_COLOR->value;
         }
 
         if (!$this->currentTemplateOptions->isSupportCustomColors()) {
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_PRIMARY_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_SECONDARY_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_BACKGROUND_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_LINK_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_LINK_HOVER_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_PRIMARY_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_SECONDARY_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_BACKGROUND_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_LINK_COLOR->value;
-            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_LINK_HOVER_COLOR->value;
+            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_LIGHT_MODE_COLOR->value;
+            $hiddenSettings[] = SettingEnum::DEFAULT_THEME_DARK_MODE_COLOR->value;
         }
 
         if ($this->disableDarkMode) {

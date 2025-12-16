@@ -3,11 +3,11 @@
 {% block title %}| {{ 'pteroca.cart_topup.title'|trans }}{% endblock %}
 
 {% block content %}
-    <div class="container-fluid mt-4">
+    <div class="mt-4">
         <!-- Header Section -->
         <div class="row">
             <div class="col-12">
-                <div class="bg-light rounded-3 p-4 mb-4">
+                <div class="dashboard-header rounded-3 p-4 mb-4">
                     <div class="d-flex align-items-center justify-content-between">
                         <div class="d-flex align-items-center">
                             <div class="bg-primary rounded-circle me-3">
@@ -19,7 +19,7 @@
                             </div>
                         </div>
                         <div class="d-flex gap-2">
-                            <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#useVoucherModal">
+                            <button type="button" class="btn primary p-3" data-bs-toggle="modal" data-bs-target="#useVoucherModal">
                                 <i class="fa fa-plus me-2"></i>{{ 'pteroca.cart.use_voucher'|trans }}
                             </button>
                         </div>
@@ -28,10 +28,14 @@
             </div>
         </div>
 
-        <form action="{{ path('panel', { routeName: 'cart_topup' }) }}" method="post">
-            <input type="hidden" name="amount" value="{{ request.amount }}" id="topup-amount">
-            <input type="hidden" name="currency" value="{{ request.currency }}">
-            <input type="hidden" name="voucher" value="" id="voucher-code" data-voucher-type="payment_discount">
+        {{ form_start(form, {
+            'action': path('panel', { routeName: 'cart_topup' }),
+            'method': 'POST',
+            'attr': {'id': 'topup-form'}
+        }) }}
+            {{ form_widget(form.amount, {'type': 'hidden', 'attr': {'id': 'topup-amount'}}) }}
+            {{ form_widget(form.currency) }}
+            {{ form_widget(form.voucher, {'attr': {'id': 'voucher-code', 'data-voucher-type': 'payment_discount', 'value': ''}}) }}
             
             <div class="row g-4">
                 <!-- Main Content -->
@@ -41,26 +45,19 @@
                         <div class="card-header">
                             <div class="d-flex align-items-center">
                                 <i class="fas fa-wallet me-2"></i>
-                                <h5 class="mb-1 fw-bold text-white">{{ 'pteroca.cart_topup.order'|trans }}</h5>
+                                <h5 class="mb-0 fw-semibold">{{ 'pteroca.cart_topup.order'|trans }}</h5>
                             </div>
                         </div>
                         <div class="card-body p-4">
-                            <div class="d-flex align-items-center justify-content-between">
+                            <div class="d-flex align-items-center">
                                 <div>
-                                    <div class="d-flex align-items-center mb-2">
-                                        <div class="bg-success bg-opacity-10 rounded-circle me-3">
-                                            <i class="fas fa-coins p-3 text-success"></i>
-                                        </div>
-                                        <div>
-                                            <small>{{ 'pteroca.cart_topup.order_description'|trans }}</small>
-                                            <div class="fw-bold fs-5 text-success">
-                                                {{ request.amount|number_format(2, '.', '') }} {{ get_currency() }}
-                                            </div>
-                                        </div>
-                                    </div>
+                                    <i class="fas fa-coins text-success me-3" style="font-size: 2.5rem;"></i>
                                 </div>
-                                <div class="text-end">
-                                    <i class="fas fa-plus-circle text-success" style="font-size: 3rem;"></i>
+                                <div>
+                                    <small class="text-muted">{{ 'pteroca.cart_topup.order_description'|trans }}</small>
+                                    <div class="fw-bold fs-4 text-success">
+                                        {{ request.amount|number_format(2, '.', '') }} {{ get_currency() }}
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -71,29 +68,49 @@
                         <div class="card-header">
                             <div class="d-flex align-items-center">
                                 <i class="fas fa-credit-card me-2"></i>
-                                <h5 class="mb-1 fw-bold text-white">{{ 'pteroca.cart_topup.payment_method'|trans }}</h5>
+                                <h5 class="mb-0 fw-semibold">{{ 'pteroca.cart_topup.payment_method'|trans }}</h5>
                             </div>
                         </div>
                         <div class="card-body p-4">
-                            <div class="row g-3">
-                                <div class="col-12 col-sm-6 col-md-6 col-lg-4">
-                                    <input type="radio"
-                                           name="payment_provider"
-                                           id="provider1"
-                                           value="provider1"
-                                           class="card-input-element d-none"
-                                           checked>
-                                    <label for="provider1" class="card border-2 shadow-sm rounded-3 card-input h-100">
-                                        <div class="card-body text-center p-4">
-                                            <img src="{{ asset('assets/img/payments/stripe.svg') }}"
-                                                 alt="Stripe"
-                                                 class="img-fluid mb-3"
-                                                 style="max-height: 40px;">
-                                            <h6 class="card-title mb-0 fw-semibold">Stripe</h6>
-                                        </div>
-                                    </label>
+                            {% if availableGateways is empty %}
+                                <div class="alert alert-warning">
+                                    <i class="fas fa-exclamation-triangle me-2"></i>
+                                    {{ 'pteroca.payment.no_gateways_available'|trans }}
                                 </div>
-                            </div>
+                            {% else %}
+                                <div class="row g-3">
+                                    {% for radio in form.gateway %}
+                                        {% set gatewayIdentifier = radio.vars.value %}
+                                        {% set gateway = null %}
+                                        {% for gw in availableGateways %}
+                                            {% if gw.getIdentifier() == gatewayIdentifier %}
+                                                {% set gateway = gw %}
+                                            {% endif %}
+                                        {% endfor %}
+
+                                        {% if gateway %}
+                                            <div class="col-12 col-sm-6 col-md-6 col-lg-4">
+                                                <input type="radio"
+                                                       id="{{ radio.vars.id }}"
+                                                       name="{{ radio.vars.full_name }}"
+                                                       value="{{ radio.vars.value }}"
+                                                       class="payment-gateway-input"
+                                                       {% if radio.vars.checked %}checked="checked"{% endif %}>
+                                                <label for="{{ radio.vars.id }}" class="payment-gateway-card card border-2 shadow-sm rounded-3 h-100">
+                                                    <div class="card-body text-center p-4">
+                                                        <i class="{{ gateway.getIcon() }} mb-3" style="font-size: 2.5rem; {% if gateway.getMetadata().color is defined %}color: {{ gateway.getMetadata().color }};{% endif %}"></i>
+                                                        <h6 class="card-title mb-0 fw-semibold">{{ gateway.getDisplayName() }}</h6>
+                                                        {% if gateway.getDescription() %}
+                                                            <small class="text-muted d-block mt-1">{{ gateway.getDescription() }}</small>
+                                                        {% endif %}
+                                                    </div>
+                                                </label>
+                                            </div>
+                                        {% endif %}
+                                    {% endfor %}
+                                    {% do form.gateway.setRendered %}
+                                </div>
+                            {% endif %}
                         </div>
                     </div>
                 </div>
@@ -104,7 +121,7 @@
                         <div class="card-header bg-success text-white">
                             <div class="d-flex align-items-center">
                                 <i class="fas fa-receipt me-2"></i>
-                                <h5 class="mb-1 fw-bold text-white">{{ 'pteroca.cart_configuration.order_summary'|trans }}</h5>
+                                <h5 class="mb-0 fw-semibold">{{ 'pteroca.cart_configuration.order_summary'|trans }}</h5>
                             </div>
                         </div>
                         <div class="card-body p-4">
@@ -124,11 +141,17 @@
                             <hr class="my-3">
                             
                             <!-- Payment Method -->
-                            <div class="mb-3">
+                            <div class="mb-3" id="payment-method-section">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
                                         <small>{{ 'pteroca.cart_topup.payment_method'|trans }}:</small>
-                                        <div id="selected-payment-method" class="fw-semibold">Stripe</div>
+                                        <div id="selected-payment-method" class="fw-semibold">
+                                            {% if availableGateways is not empty %}
+                                                {{ availableGateways|first.getDisplayName() }}
+                                            {% else %}
+                                                -
+                                            {% endif %}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -165,7 +188,7 @@
 
                             <!-- Order Button -->
                             <div class="d-grid">
-                                <button type="submit" id="order-submit" class="btn btn-success btn-lg rounded-pill fw-semibold">
+                                <button type="submit" id="order-submit" class="btn success btn-lg rounded-3 fw-semibold p-3">
                                     <i class="fa fa-shopping-basket me-2"></i>
                                     {{ 'pteroca.product.order_now'|trans }}
                                 </button>
@@ -174,7 +197,8 @@
                     </div>
                 </div>
             </div>
-        </form>
+        {{ form_rest(form) }}
+        {{ form_end(form, {'render_rest': false}) }}
     </div>
 
     {% include 'components/use_voucher_modal.html.twig' %}
@@ -189,14 +213,40 @@
             document.getElementById('applied-discount-remove').addEventListener('click', removeDiscountCode);
 
             // Add event listeners for payment method selection
-            const paymentRadios = document.querySelectorAll('input[name="payment_provider"]');
+            const paymentRadios = document.querySelectorAll('input[name="top_up_balance[gateway]"]');
+            const orderButton = document.getElementById('order-submit');
+            const topupForm = document.getElementById('topup-form');
+
             paymentRadios.forEach(radio => {
-                radio.addEventListener('change', updateSelectedPaymentMethod);
+                radio.addEventListener('change', function() {
+                    updateSelectedPaymentMethod();
+                    updateOrderButtonState();
+                });
             });
+
+            // Disable order button if no payment gateways available
+            if (paymentRadios.length === 0 && orderButton) {
+                orderButton.disabled = true;
+                orderButton.classList.add('disabled');
+            }
+
+            // Form submission validation
+            if (topupForm) {
+                topupForm.addEventListener('submit', function(e) {
+                    const selectedGateway = document.querySelector('input[name="top_up_balance[gateway]"]:checked');
+
+                    if (!selectedGateway) {
+                        e.preventDefault();
+                        alert('{{ 'pteroca.cart_topup.select_payment_method'|trans }}');
+                        return false;
+                    }
+                });
+            }
 
             calculatePrice();
             updateSelectedPaymentMethod();
-        })
+            updateOrderButtonState();
+        });
 
         function calculatePrice() {
             const appliedDiscountValue = document.querySelector('#applied-discount-value')
@@ -215,11 +265,26 @@
         }
 
         function updateSelectedPaymentMethod() {
-            const selectedRadio = document.querySelector('input[name="payment_provider"]:checked');
+            const selectedRadio = document.querySelector('input[name="top_up_balance[gateway]"]:checked');
             if (selectedRadio) {
                 const label = document.querySelector(`label[for="${selectedRadio.id}"]`);
                 const methodName = label.querySelector('.card-title').textContent;
                 document.querySelector('#selected-payment-method').textContent = methodName;
+            }
+        }
+
+        function updateOrderButtonState() {
+            const selectedGateway = document.querySelector('input[name="top_up_balance[gateway]"]:checked');
+            const orderButton = document.getElementById('order-submit');
+
+            if (orderButton) {
+                if (selectedGateway) {
+                    orderButton.disabled = false;
+                    orderButton.classList.remove('disabled');
+                } else {
+                    orderButton.disabled = true;
+                    orderButton.classList.add('disabled');
+                }
             }
         }
     </script>

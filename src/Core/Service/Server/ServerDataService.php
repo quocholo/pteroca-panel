@@ -4,29 +4,26 @@ namespace App\Core\Service\Server;
 
 use App\Core\Contract\UserInterface;
 use App\Core\DTO\Collection\ServerVariableCollection;
+use App\Core\DTO\Pterodactyl\Application\PterodactylServer;
 use App\Core\DTO\ServerDataDTO;
 use App\Core\Entity\Server;
 use App\Core\Enum\ServerPermissionEnum;
 use App\Core\Enum\ServerStatusEnum;
 use App\Core\Enum\SettingEnum;
-use App\Core\Exception\UserDoesNotHaveClientApiKeyException;
 use App\Core\Factory\ServerVariableFactory;
 use App\Core\Service\Logs\ServerLogService;
-use App\Core\Service\Pterodactyl\PterodactylClientService;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use App\Core\Service\SettingService;
 use App\Core\Trait\ServerPermissionsTrait;
 use Exception;
 use Psr\Log\LoggerInterface;
-use Timdesm\PterodactylPhpApi\Resources\Server as PterodactylServer;
 
 class ServerDataService
 {
     use ServerPermissionsTrait;
 
     public function __construct(
-        private readonly PterodactylService $pterodactylService,
-        private readonly PterodactylClientService $pterodactylClientService,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
         private readonly ServerNestService $serverNestService,
         private readonly ServerService $serverService,
         private readonly ServerVariableFactory $serverVariableFactory,
@@ -39,12 +36,11 @@ class ServerDataService
 
     public function getServerData(Server $server, UserInterface $user, int $currentPage): ServerDataDTO
     {
-        /** @var PterodactylServer $pterodactylServer */
-        $pterodactylServer = $this->pterodactylService
-            ->getApi()
-            ->servers
-            ->get($server->getPterodactylServerId(), [
-                'include' => ['variables', 'egg', 'databases', 'subusers'],
+        $pterodactylServer = $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->servers()
+            ->getServer($server->getPterodactylServerId(), [
+                'variables', 'egg', 'databases', 'subusers',
             ]);
         
         $isInstalling = $this->isServerInstalling($pterodactylServer);
@@ -66,22 +62,14 @@ class ServerDataService
         
         $permissions = $this->getServerPermissions($pterodactylServer, $server, $user);
 
-        try {
-            $pterodactylClientApi = $this->pterodactylClientService
-                ->getApi($user);
-        } catch (UserDoesNotHaveClientApiKeyException $e) {
-            $pterodactylClientApi = null;
-        }
+        $pterodactylClientApi = $this->pterodactylApplicationService
+            ->getClientApi($user);
 
         if ($permissions->hasPermission(ServerPermissionEnum::ALLOCATION_READ)) {
             try {
-                $allocatedPorts = $pterodactylClientApi->servers
-                    ->http
-                    ->get(sprintf('servers/%s/network/allocations', $server->getPterodactylServerIdentifier()))
+                $allocatedPorts = $pterodactylClientApi->network()
+                    ->getAllocations($server->getPterodactylServerIdentifier())
                     ->toArray();
-                $allocatedPorts = array_map(function ($allocation) {
-                    return $allocation->toArray();
-                }, $allocatedPorts);
             } catch (Exception $exception) {
                 $this->logger->error('Failed to get allocated ports for server', [
                     'server_id' => $server->getId(),
@@ -94,8 +82,8 @@ class ServerDataService
 
         try {
             $pterodactylClientServer = $pterodactylClientApi
-                ?->servers
-                ->get($server->getPterodactylServerIdentifier());
+                ->servers()
+                ->getServer($server->getPterodactylServerIdentifier());
         } catch (Exception $exception) {
             $this->logger->error('Failed to get server details from Client API', [
                 'server_id' => $server->getId(),
@@ -108,8 +96,8 @@ class ServerDataService
 
         try {
             $pterodactylClientAccount = $pterodactylClientApi
-                ?->account
-                ->details();
+                ->account()
+                ->getAccount();
         } catch (Exception $exception) {
             $this->logger->error('Failed to get account details from Client API', [
                 'server_id' => $server->getId(),
@@ -118,7 +106,6 @@ class ServerDataService
             ]);
             $pterodactylClientAccount = null;
         }
-
         $productEggsConfiguration = $server->getServerProduct()->getEggsConfiguration();
 
         try {
@@ -155,9 +142,8 @@ class ServerDataService
         if ($server->getServerProduct()->getBackups() && $permissions->hasPermission(ServerPermissionEnum::BACKUP_READ)) {
             try {
                 $serverBackups = $pterodactylClientApi
-                    ->server_backups
-                    ->http
-                    ->get(sprintf('servers/%s/backups', $server->getPterodactylServerIdentifier()))
+                    ->backups()
+                    ->getBackups($server->getPterodactylServerIdentifier())
                     ->toArray();
             } catch (Exception $exception) {
                 $this->logger->error('Failed to get server backups', [
@@ -171,12 +157,9 @@ class ServerDataService
 
         if ($permissions->hasPermission(ServerPermissionEnum::USER_READ)) {
             try {
-                $subusers = $pterodactylClientApi->servers
-                    ->http
-                    ->get(sprintf(
-                        'servers/%s/users',
-                        $server->getPterodactylServerIdentifier(),
-                    ))
+                $subusers = $pterodactylClientApi
+                    ->users()
+                    ->getUsers($server->getPterodactylServerIdentifier())
                     ->toArray();
             } catch (Exception $exception) {
                 $this->logger->error('Failed to get server subusers', [
@@ -195,12 +178,9 @@ class ServerDataService
 
             if ($showPterodactylLogs) {
                 try {
-                    $pterodactylActivityLogs = $pterodactylClientApi->servers
-                        ->http
-                        ->get(sprintf(
-                            'servers/%s/activity',
-                            $server->getPterodactylServerIdentifier(),
-                        ))->toArray();
+                    $pterodactylActivityLogs = $pterodactylClientApi->servers()
+                        ->getServerActivity($server->getPterodactylServerIdentifier())
+                        ->toArray();
                 } catch (Exception $exception) {
                     $this->logger->error('Failed to get server activity logs', [
                         'server_id' => $server->getId(),
@@ -220,14 +200,9 @@ class ServerDataService
 
         if ($permissions->hasPermission(ServerPermissionEnum::SCHEDULE_READ)) {
             try {
-                $serverSchedules = $pterodactylClientApi
-                    ->servers
-                    ->http
-                    ->get(sprintf('servers/%s/schedules', $server->getPterodactylServerIdentifier()))
+                $serverSchedules = $pterodactylClientApi->schedules()
+                    ->getSchedules($server->getPterodactylServerIdentifier())
                     ->toArray();
-                $serverSchedules = array_map(function ($schedule) {
-                    return $schedule->toArray();
-                }, $serverSchedules);
             } catch (Exception $exception) {
                 $this->logger->error('Failed to get server schedules', [
                     'server_id' => $server->getId(),
@@ -240,13 +215,13 @@ class ServerDataService
 
         return new ServerDataDTO(
             pterodactylServer: $pterodactylServer->toArray(),
-            isInstalling: $isInstalling,
+            isInstalling: false,
             server: $server,
             serverPermissions: $permissions,
             serverDetails: $this->serverService->getServerDetails($server),
             dockerImages: $dockerImages ?? [],
-            pterodactylClientServer: $pterodactylClientServer?->toArray(),
-            pterodactylClientAccount: $pterodactylClientAccount?->toArray(),
+            pterodactylClientServer: $pterodactylClientServer->toArray(),
+            pterodactylClientAccount: $pterodactylClientAccount->toArray(),
             productEggConfiguration: $productEggConfiguration,
             availableNestEggs: $availableNestEggs ?? null,
             hasConfigurableOptions: $hasConfigurableOptions ?? false,
@@ -269,7 +244,7 @@ class ServerDataService
 
         try {
             $productEggConfiguration = json_decode($productEggConfiguration, true, 512, JSON_THROW_ON_ERROR);
-        } catch (Exception $e) {
+        } catch (Exception) {
             return [false, false];
         }
 

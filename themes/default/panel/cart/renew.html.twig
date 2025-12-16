@@ -3,11 +3,11 @@
 {% block title %}| {{ 'pteroca.cart_renew.title'|trans }} - {{ server.serverProduct.name }} #{{ server.pterodactylServerIdentifier }}{% endblock %}
 
 {% block content %}
-    <div class="container-fluid mt-4">
+    <div class="mt-4">
         <!-- Header Section -->
         <div class="row">
             <div class="col-12">
-                <div class="bg-light rounded-3 p-4 mb-4">
+                <div class="dashboard-header rounded-3 p-4 mb-4">
                     <div class="d-flex align-items-center justify-content-between">
                         <div class="d-flex align-items-center">
                             <div class="bg-primary rounded-circle me-3">
@@ -19,7 +19,7 @@
                             </div>
                         </div>
                         <div class="d-flex gap-2">
-                            <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#useVoucherModal">
+                            <button type="button" class="btn primary p-3" data-bs-toggle="modal" data-bs-target="#useVoucherModal">
                                 <i class="fa fa-plus me-2"></i>{{ 'pteroca.cart.use_voucher'|trans }}
                             </button>
                         </div>
@@ -28,12 +28,15 @@
             </div>
         </div>
 
-        <form action="{{ path('panel', { routeName: 'cart_renew_buy' }) }}" method="post" id="cart-renew-form">
-            <input type="hidden" name="id" value="{{ server.id }}">
-            <input type="hidden" name="voucher" value="" id="voucher-code" data-voucher-type="server_discount">
-            <input type="hidden" name="_csrf_token" value="{{ csrf_token('submit') }}">
-            <input type="hidden" name="purchase_token" value="{{ purchase_token }}">
-
+        {{ form_start(form, {
+            'action': path('panel', { routeName: 'cart_renew_buy', 'id': server.id }),
+            'method': 'POST',
+            'attr': {'id': 'renew-form'}
+        }) }}
+            {{ form_widget(form.id) }}
+            {{ form_widget(form.voucher, {'attr': {'id': 'voucher-code', 'data-voucher-type': 'server_discount'}}) }}
+            <input type="hidden" name="purchase_token" value="{{ purchase_token }}" />
+            
             <div class="row g-4">
                 <!-- Server Information -->
                 <div class="col-lg-8">
@@ -42,7 +45,7 @@
                         <div class="card-header">
                             <div class="d-flex align-items-center">
                                 <i class="fas fa-server me-2"></i>
-                                <h5 class="mb-1 fw-bold text-white">{{ server.serverProduct.name }} #{{ server.pterodactylServerIdentifier }}</h5>
+                                <h5 class="mb-0 fw-semibold">{{ server.serverProduct.name }} #{{ server.pterodactylServerIdentifier }}</h5>
                             </div>
                         </div>
                         <div class="card-body p-4">
@@ -166,11 +169,10 @@
                         <div class="card-header">
                             <div class="d-flex align-items-center">
                                 <i class="fas fa-cogs me-2"></i>
-                                <h5 class="mb-1 fw-bold text-white">{{ 'pteroca.cart_configuration.configuration'|trans }}</h5>
+                                <h5 class="mb-0 fw-semibold">{{ 'pteroca.cart_configuration.configuration'|trans }}</h5>
                             </div>
                         </div>
                         <div class="card-body p-4">
-                            <input type="hidden" name="product" value="{{ server.id }}">
                             <div class="row g-4">
                                 <div class="col-md-6">
                                     <label for="duration" class="form-label fw-semibold">
@@ -201,8 +203,7 @@
                                         <i class="fas fa-layer-group me-2 text-warning"></i>
                                         {{ 'pteroca.product.slots'|trans }}
                                     </label>
-                                    <input type="number" class="form-control form-control-lg" id="server-slots" name="server-slots" 
-                                           value="{{ serverSlots|default(1) }}" readonly readonly>
+                                    {{ form_widget(form['server-slots'], {'attr': {'id': 'server-slots'}}) }}
                                 </div>
                                 {% endif %}
 
@@ -214,24 +215,7 @@
                                             <small class="text-muted">({{ 'pteroca.cart_configuration.owner_only'|trans }})</small>
                                         {% endif %}
                                     </label>
-                                    <select id="auto-renewal" name="auto-renewal" class="form-select form-select-lg" {% if not isOwner %}disabled{% endif %}>
-                                        <option value="{{ server.autoRenewal ? '1' : '0' }}" selected>
-                                            {% if server.autoRenewal %}
-                                                {{ 'pteroca.cart_configuration.enable'|trans }}
-                                            {% else %}
-                                                {{ 'pteroca.cart_configuration.disable'|trans }}
-                                            {% endif %}
-                                        </option>
-                                        {% if isOwner %}
-                                            <option value="{{ server.autoRenewal ? '0' : '1' }}">
-                                                {% if server.autoRenewal %}
-                                                    {{ 'pteroca.cart_configuration.disable'|trans }}
-                                                {% else %}
-                                                    {{ 'pteroca.cart_configuration.enable'|trans }}
-                                                {% endif %}
-                                            </option>
-                                        {% endif %}
-                                    </select>
+                                    {{ form_widget(form['auto-renewal'], {'attr': {'id': 'auto-renewal'}}) }}
                                 </div>
                             </div>
                         </div>
@@ -244,7 +228,7 @@
                         <div class="card-header bg-success text-white">
                             <div class="d-flex align-items-center">
                                 <i class="fas fa-receipt me-2"></i>
-                                <h5 class="mb-1 fw-bold text-white">{{ 'pteroca.cart_configuration.order_summary'|trans }}</h5>
+                                <h5 class="mb-0 fw-semibold">{{ 'pteroca.cart_configuration.order_summary'|trans }}</h5>
                             </div>
                         </div>
                         <div class="card-body p-4">
@@ -305,7 +289,7 @@
 
                             <!-- Order Button -->
                             <div class="d-grid">
-                                <button type="submit" id="order-submit" class="btn btn-success btn-lg rounded-pill fw-semibold" disabled>
+                                <button type="submit" id="order-submit" class="btn success btn-lg rounded-pill fw-semibold p-3" disabled>
                                     <i class="fa fa-shopping-basket me-2"></i>
                                     {{ 'pteroca.product.order_now'|trans }}
                                 </button>
@@ -314,7 +298,7 @@
                     </div>
                 </div>
             </div>
-        </form>
+        {{ form_end(form) }}
     </div>
 
     {% include 'components/use_voucher_modal.html.twig' %}

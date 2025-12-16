@@ -1,65 +1,71 @@
-{% extends 'base.html.twig' %}
+{% extends 'panel/layout/split_screen.html.twig' %}
 
-{% block body_class 'page-login' %}
-{% block title %}{{ get_title() }} | {{ 'pteroca.recovery.change_password'|trans }}{% endblock %}
+{% block page_title %}{{ get_title() }} | {{ 'pteroca.recovery.change_password'|trans }}{% endblock %}
 
-{% block stylesheets %}
-    <link rel="stylesheet" href="{{ template_asset('css/app.css') }}">
-    <link rel="stylesheet" href="{{ template_asset('css/panel.css?v=' ~ get_app_version()) }}">
+{% block left_content %}
+    <h2 class="login-brand-title">{{ 'pteroca.recovery.reset_title'|trans }}</h2>
+    <p class="login-brand-subtitle">{{ 'pteroca.recovery.reset_description'|trans }}</p>
+
+    <div class="login-features">
+        <div class="login-feature-item">
+            <i class="fas fa-lock"></i>
+            <span>{{ 'pteroca.recovery.feature_secure_reset'|trans }}</span>
+        </div>
+        <div class="login-feature-item">
+            <i class="fas fa-key"></i>
+            <span>{{ 'pteroca.recovery.feature_new_password'|trans }}</span>
+        </div>
+        <div class="login-feature-item">
+            <i class="fas fa-check-circle"></i>
+            <span>{{ 'pteroca.recovery.feature_instant_access'|trans }}</span>
+        </div>
+    </div>
 {% endblock %}
 
-{% block body %}
-    <div class="container">
-        <div class="row">
-            <div class="col-12">
-                {% include '@EasyAdmin/flash_messages.html.twig' %}
+{% block form_title %}
+    <h1 class="h4 fw-bold text-dark mb-1">{{ 'pteroca.recovery.change_password'|trans }}</h1>
+{% endblock %}
 
-                <div class="login-wrapper">
-                    <header class="main-header register-header">
-                        <div id="header-logo">
-                            <div class="logo">
-                                <img src="{{ get_logo() }}" alt="{{ get_title() }}" class="panel-login-logo">
-                            </div>
-                        </div>
-                    </header>
-                    <section class="content">
-                        <div class="login-title">
-                            {{ 'pteroca.recovery.change_password'|trans }}
-                        </div>
-                        {% if error|default(false) %}
-                            <div class="w-100 alert alert-danger rounded mb-3">
-                                <i class="fas fa-times-circle mr-1"></i>
-                                {{ error.messageKey|trans(error.messageData, 'security') }}
-                            </div>
-                        {% endif %}
+{% block form_subtitle %}
+    <p class="text-muted small mb-0">{{ 'pteroca.recovery.change_password_subtitle'|trans }}</p>
+{% endblock %}
 
-                        {{ form_errors(resetForm) }}
-
-                        {{ form_start(resetForm) }}
-                        <div class="form-group">
-                            <label class="form-control-label required" for="newPassword">{{ field_label(resetForm.newPassword) }}</label>
-                            <div class="form-widget">
-                                <input type="password" id="newPassword" name="{{ field_name(resetForm.newPassword) }}" class="form-control" required autofocus autocomplete="new-password">
-                            </div>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-control-label required" for="confirmPassword">{{ field_label(resetForm.confirmPassword) }}</label>
-                            <div class="form-widget">
-                                <input type="password" id="confirmPassword" name="{{ field_name(resetForm.confirmPassword) }}" class="form-control" required autocomplete="new-password">
-                            </div>
-                        </div>
-
-                        <div class="form-group">
-                            <button type="submit" class="btn btn-lg btn-block">{{ 'pteroca.recovery.change_password'|trans }}</button>
-                        </div>
-                        {{ form_end(resetForm) }}
-                    </section>
-                    <div class="col-12 text-center mt-2 powered-by">
-                        Powered by <a href="https://pteroca.com" target="_blank">Pteroca v{{ get_app_version() }}</a> &copy; {{ 'now'|date('Y') }}
-                    </div>
-                </div>
+{% block form_content %}
+    <!-- Error Message -->
+    {% if error|default(false) %}
+        <div class="alert alert-danger d-flex align-items-center mb-3" role="alert">
+            <i class="fas fa-exclamation-triangle me-2"></i>
+            <div>
+                {{ error.messageKey|trans(error.messageData, 'security') }}
             </div>
         </div>
+    {% endif %}
+
+    {{ form_errors(resetForm) }}
+
+    <!-- Reset Password Form -->
+    {{ form_start(resetForm) }}
+
+        {{ form_row(resetForm.newPassword) }}
+        {{ form_row(resetForm.confirmPassword) }}
+
+        <!-- Submit Button -->
+        <div class="d-grid mb-3">
+            <button type="submit" class="btn primary btn-lg fw-semibold p-4">
+                <i class="fas fa-key me-2"></i>
+                {{ 'pteroca.recovery.change_password'|trans }}
+            </button>
+        </div>
+    {{ form_end(resetForm) }}
+{% endblock %}
+
+{% block footer_links %}
+    <div class="text-center">
+        <p class="text-muted small mb-0">
+            <a href="{{ path('app_login') }}" class="text-decoration-none">
+                <i class="fas fa-arrow-left me-1"></i>
+                {{ 'pteroca.recovery.back_to_login'|trans }}
+            </a>
+        </p>
     </div>
 {% endblock %}

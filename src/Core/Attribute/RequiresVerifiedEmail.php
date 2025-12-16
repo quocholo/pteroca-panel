@@ -2,10 +2,12 @@
 
 namespace App\Core\Attribute;
 
-#[\Attribute(\Attribute::TARGET_CLASS | \Attribute::TARGET_METHOD)]
+use Attribute;
+
+#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_METHOD)]
 class RequiresVerifiedEmail
 {
     public function __construct(
-        public readonly string $redirectRoute = 'verify_notice'
+        public string $redirectRoute = 'verify_notice'
     ) {}
 }

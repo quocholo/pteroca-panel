@@ -9,7 +9,7 @@ use Doctrine\ORM\Mapping as ORM;
 
 #[ORM\Entity(repositoryClass: ServerRepository::class)]
 #[ORM\HasLifecycleCallbacks]
-class Server
+class Server extends AbstractEntity
 {
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -46,6 +46,12 @@ class Server
 
     #[ORM\Column(type: 'boolean', options: ['default' => false])]
     private bool $autoRenewal = false;
+
+    /**
+     * Non-persisted property for storing full image path in presentation layer
+     * Set dynamically in controllers/services, not stored in database
+     */
+    private ?string $imagePath = null;
 
     #[ORM\PrePersist]
     public function setCreatedAtValue(): void
@@ -162,6 +168,17 @@ class Server
     public function setAutoRenewal(bool $autoRenewal): self
     {
         $this->autoRenewal = $autoRenewal;
+        return $this;
+    }
+
+    public function getImagePath(): ?string
+    {
+        return $this->imagePath;
+    }
+
+    public function setImagePath(?string $imagePath): self
+    {
+        $this->imagePath = $imagePath;
         return $this;
     }
 

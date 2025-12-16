@@ -4,6 +4,7 @@ namespace App\Core\Repository;
 
 use App\Core\Contract\UserInterface;
 use App\Core\Entity\User;
+use DateTime;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\DBAL\LockMode;
 use Doctrine\Persistence\ManagerRegistry;
@@ -34,7 +35,7 @@ class UserRepository extends ServiceEntityRepository implements PasswordUpgrader
         $this->getEntityManager()->flush();
     }
 
-    public function getUsersRegisteredAfterCount(\DateTime $date): int
+    public function getUsersRegisteredAfterCount(DateTime $date): int
     {
         return $this->createQueryBuilder('u')
             ->select('COUNT(u.id)')

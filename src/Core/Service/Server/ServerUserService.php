@@ -5,38 +5,55 @@ namespace App\Core\Service\Server;
 use App\Core\Contract\UserInterface;
 use App\Core\Entity\Server;
 use App\Core\Entity\ServerSubuser;
-use App\Core\Enum\EmailVerificationValueEnum;
-use App\Core\Enum\ServerLogActionEnum;
+use App\Core\Enum\PermissionEnum;
 use App\Core\Enum\SettingEnum;
-use App\Core\Repository\ServerSubuserRepository;
+use App\Core\Service\SettingService;
+use App\Core\Enum\ServerLogActionEnum;
 use App\Core\Repository\UserRepository;
 use App\Core\Service\Logs\ServerLogService;
-use App\Core\Service\Pterodactyl\PterodactylClientService;
-use App\Core\Service\Pterodactyl\PterodactylService;
-use App\Core\Service\SettingService;
+use App\Core\Enum\EmailVerificationValueEnum;
+use App\Core\Repository\ServerSubuserRepository;
+use Exception;
+use RuntimeException;
 use Symfony\Contracts\Translation\TranslatorInterface;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
+use App\Core\Event\Server\User\ServerSubuserCreatedEvent;
+use App\Core\Event\Server\User\ServerSubuserCreationFailedEvent;
+use App\Core\Event\Server\User\ServerSubuserCreationRequestedEvent;
+use App\Core\Event\Server\User\ServerSubuserDeletedEvent;
+use App\Core\Event\Server\User\ServerSubuserDeletionRequestedEvent;
+use App\Core\Event\Server\User\ServerSubuserPermissionsUpdateRequestedEvent;
+use App\Core\Event\Server\User\ServerSubuserPermissionsUpdatedEvent;
+use App\Core\Service\Event\EventContextService;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
-class ServerUserService
+readonly class ServerUserService
 {
     public function __construct(
-        private readonly PterodactylClientService $pterodactylClientService,
-        private readonly PterodactylService $pterodactylService,
-        private readonly ServerLogService $serverLogService,
-        private readonly ServerSubuserRepository $serverSubuserRepository,
-        private readonly UserRepository $userRepository,
-        private readonly TranslatorInterface $translator,
-        private readonly SettingService $settingService,
+        private PterodactylApplicationService $pterodactylApplicationService,
+        private ServerLogService              $serverLogService,
+        private ServerSubuserRepository       $serverSubuserRepository,
+        private UserRepository                $userRepository,
+        private TranslatorInterface           $translator,
+        private SettingService                $settingService,
+        private EventDispatcherInterface      $eventDispatcher,
+        private RequestStack                  $requestStack,
+        private EventContextService           $eventContextService,
     ) {}
 
     public function getAllSubusers(Server $server, UserInterface $user): array
     {
-        return $this->pterodactylClientService
-            ->getApi($user)
-            ->http
-            ->get(sprintf('servers/%s/users', $server->getPterodactylServerIdentifier()))
+        return $this->pterodactylApplicationService
+            ->getClientApi($user)
+            ->users()
+            ->getUsers($server->getPterodactylServerIdentifier())
             ->toArray();
     }
 
+    /**
+     * @throws Exception
+     */
     public function addExistingUserToServer(
         Server $server,
         UserInterface $user,
@@ -44,33 +61,52 @@ class ServerUserService
         array $permissions = []
     ): array
     {
-        $pterodactylClientApi = $this->pterodactylClientService->getApi($user);
-        $pterodactylApi = $this->pterodactylService->getApi();
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerSubuserCreationRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $email,
+            $permissions,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Subuser creation was blocked';
+            throw new RuntimeException($reason);
+        }
+
+        $pterodactylClientApi = $this->pterodactylApplicationService
+            ->getClientApi($user);
 
         try {
-            $existingPterodactylUsers = $pterodactylApi->users->all(['filter[email]' => $email]);
+            $existingPterodactylUsers = $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->users()
+                ->getAllUsers(['filter[email]' => $email]);
             $existingPterocaUser = $this->userRepository->findOneBy(['email' => $email]);
 
             if (count($existingPterodactylUsers->toArray()) === 0 || !$existingPterocaUser) {
-                throw new \Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
+                throw new Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
             }
 
             $verificationSetting = $this->settingService->getSetting(SettingEnum::REQUIRE_EMAIL_VERIFICATION->value);
             if ($verificationSetting === EmailVerificationValueEnum::REQUIRED->value && !$existingPterocaUser->isVerified()) {
-                throw new \Exception($this->translator->trans('pteroca.api.server_user.user_not_verified', ['email' => $email]));
+                throw new Exception($this->translator->trans('pteroca.api.server_user.user_not_verified', ['email' => $email]));
             }
 
             $currentSubusers = $this->getAllSubusers($server, $user);
             foreach ($currentSubusers['data'] ?? [] as $subuser) {
                 if (isset($subuser['attributes']['email']) && $subuser['attributes']['email'] === $email) {
-                    throw new \Exception($this->translator->trans('pteroca.api.server_user.user_already_added', ['email' => $email]));
+                    throw new Exception($this->translator->trans('pteroca.api.server_user.user_already_added', ['email' => $email]));
                 }
             }
 
-            $result = $pterodactylClientApi->http->post(sprintf('servers/%s/users', $server->getPterodactylServerIdentifier()), [
-                'email' => $email,
-                'permissions' => $permissions,
-            ]);
+            $result = $pterodactylClientApi->users()
+                ->createUser($server->getPterodactylServerIdentifier(), $email, $permissions);
 
             $this->syncServerSubuser($server, $existingPterocaUser, $permissions);
 
@@ -84,23 +120,51 @@ class ServerUserService
                 ]
             );
 
-            return $result->toArray();
+            $resultArray = $result->toArray();
+            $subuserUuid = $resultArray['attributes']['uuid'] ?? '';
 
-        } catch (\Exception $e) {
+            $createdEvent = new ServerSubuserCreatedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $email,
+                $subuserUuid,
+                $permissions,
+                $context
+            );
+            $this->eventDispatcher->dispatch($createdEvent);
+
+            return $resultArray;
+
+        } catch (Exception $e) {
+            $failedEvent = new ServerSubuserCreationFailedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $email,
+                $permissions,
+                $e->getMessage(),
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
             if (str_contains($e->getMessage(), 'No user found') ||
                 str_contains($e->getMessage(), 'does not exist')) {
-                throw new \Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
+                throw new Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
             }
-            
+
             if (str_contains($e->getMessage(), 'already assigned') ||
                 str_contains($e->getMessage(), 'already exists')) {
-                throw new \Exception($this->translator->trans('pteroca.api.server_user.user_already_added', ['email' => $email]));
+                throw new Exception($this->translator->trans('pteroca.api.server_user.user_already_added', ['email' => $email]));
             }
 
             throw $e;
         }
     }
 
+    /**
+     * @throws Exception
+     */
     public function updateSubuserPermissions(
         Server $server,
         UserInterface $user,
@@ -109,20 +173,41 @@ class ServerUserService
         array $permissions
     ): array
     {
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
         $existingPterocaUser = $this->userRepository->findOneBy(['email' => $email]);
-        
+
         if (!$existingPterocaUser) {
-            throw new \Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
+            throw new Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
         }
 
         $this->validateSubuserModification($server, $user, $email, $this->translator->trans('pteroca.api.server_user.modify_permissions'));
 
-        $result = $this->pterodactylClientService
-            ->getApi($user)
-            ->http
-            ->post(sprintf('servers/%s/users/%s', $server->getPterodactylServerIdentifier(), $subuserUuid), [
-                'permissions' => $permissions,
-            ]);
+        $subuserData = $this->getSubuser($server, $user, $subuserUuid);
+        $oldPermissions = $subuserData['attributes']['permissions'] ?? [];
+
+        $requestedEvent = new ServerSubuserPermissionsUpdateRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $email,
+            $subuserUuid,
+            $oldPermissions,
+            $permissions,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Subuser permissions update was blocked';
+            throw new RuntimeException($reason);
+        }
+
+        $result = $this->pterodactylApplicationService
+            ->getClientApi($user)
+            ->users()
+            ->updateUserPermissions($server->getPterodactylServerIdentifier(), $subuserUuid, $permissions);
 
         $this->syncServerSubuser($server, $existingPterocaUser, $permissions);
 
@@ -137,9 +222,24 @@ class ServerUserService
             ]
         );
 
+        $updatedEvent = new ServerSubuserPermissionsUpdatedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $email,
+            $subuserUuid,
+            $oldPermissions,
+            $permissions,
+            $context
+        );
+        $this->eventDispatcher->dispatch($updatedEvent);
+
         return $result->toArray();
     }
 
+    /**
+     * @throws Exception
+     */
     public function deleteSubuser(
         Server $server,
         UserInterface $user,
@@ -147,18 +247,36 @@ class ServerUserService
         string $email
     ): void
     {
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
         $existingPterocaUser = $this->userRepository->findOneBy(['email' => $email]);
-        
+
         if (!$existingPterocaUser) {
-            throw new \Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
+            throw new Exception($this->translator->trans('pteroca.api.server_user.user_not_exist', ['email' => $email]));
         }
 
         $this->validateSubuserModification($server, $user, $email, $this->translator->trans('pteroca.api.server_user.delete_yourself_from_server'));
 
-        $this->pterodactylClientService
-            ->getApi($user)
-            ->http
-            ->delete(sprintf('servers/%s/users/%s', $server->getPterodactylServerIdentifier(), $subuserUuid));
+        $requestedEvent = new ServerSubuserDeletionRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $email,
+            $subuserUuid,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Subuser deletion was blocked';
+            throw new RuntimeException($reason);
+        }
+
+        $this->pterodactylApplicationService
+            ->getClientApi($user)
+            ->users()
+            ->deleteUser($server->getPterodactylServerIdentifier(), $subuserUuid);
 
         $existingSubuser = $this->serverSubuserRepository->findSubuserByServerAndUser($server, $existingPterocaUser);
         if ($existingSubuser) {
@@ -174,6 +292,16 @@ class ServerUserService
                 'subuser_email' => $email,
             ]
         );
+
+        $deletedEvent = new ServerSubuserDeletedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $email,
+            $subuserUuid,
+            $context
+        );
+        $this->eventDispatcher->dispatch($deletedEvent);
     }
 
     public function getSubuser(
@@ -182,10 +310,10 @@ class ServerUserService
         string $subuserUuid
     ): array
     {
-        return $this->pterodactylClientService
-            ->getApi($user)
-            ->http
-            ->get(sprintf('servers/%s/users/%s', $server->getPterodactylServerIdentifier(), $subuserUuid))
+        return $this->pterodactylApplicationService
+            ->getClientApi($user)
+            ->users()
+            ->getUser($server->getPterodactylServerIdentifier(), $subuserUuid)
             ->toArray();
     }
 
@@ -205,13 +333,16 @@ class ServerUserService
         }
     }
 
+    /**
+     * @throws Exception
+     */
     private function validateSubuserModification(Server $server, UserInterface $user, string $targetEmail, string $action): void
     {
         $isServerOwner = $server->getUser()->getId() === $user->getId();
-        $isAdmin = in_array('ROLE_ADMIN', $user->getRoles());
-        
+        $isAdmin = $user->hasPermission(PermissionEnum::EDIT_SERVER);
+
         if (!$isServerOwner && !$isAdmin && $user->getEmail() === $targetEmail) {
-            throw new \Exception($this->translator->trans('pteroca.api.server_user.cannot_modify_yourself', ['action' => $action]));
+            throw new Exception($this->translator->trans('pteroca.api.server_user.cannot_modify_yourself', ['action' => $action]));
         }
     }
 }

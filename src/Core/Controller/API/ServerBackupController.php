@@ -4,7 +4,7 @@ namespace App\Core\Controller\API;
 
 use App\Core\Enum\ServerPermissionEnum;
 use App\Core\Repository\ServerRepository;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use App\Core\Service\Server\ServerBackupService;
 use App\Core\Trait\InternalServerApiTrait;
 use Exception;
@@ -21,7 +21,7 @@ class ServerBackupController extends APIAbstractController
     public function __construct(
         private readonly ServerRepository $serverRepository,
         private readonly ServerBackupService $serverBackupService,
-        private readonly PterodactylService $pterodactylService,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
     ) {}
 
     #[Route('/panel/api/server/{id}/backup/create', name: 'server_backup_create', methods: ['POST'])]
@@ -68,7 +68,7 @@ class ServerBackupController extends APIAbstractController
                 $backupId,
             );
             $response->setData(['url' => $downloadUrl]);
-        } catch (Exception $exception) {
+        } catch (Exception) {
             $response->setStatusCode(400);
         }
 
@@ -91,7 +91,7 @@ class ServerBackupController extends APIAbstractController
                 $backupId,
             );
             $response->setStatusCode(204);
-        } catch (Exception $exception) {
+        } catch (Exception) {
             $response->setStatusCode(400);
         }
 
@@ -109,7 +109,7 @@ class ServerBackupController extends APIAbstractController
         $response = new Response();
 
         try {
-            $truncate = $request->request->getBoolean('truncate', false);
+            $truncate = $request->request->getBoolean('truncate');
             
             $this->serverBackupService->restoreBackup(
                 $server,
@@ -118,7 +118,7 @@ class ServerBackupController extends APIAbstractController
                 $truncate,
             );
             $response->setStatusCode(204);
-        } catch (Exception $exception) {
+        } catch (Exception) {
             $response->setStatusCode(400);
         }
 

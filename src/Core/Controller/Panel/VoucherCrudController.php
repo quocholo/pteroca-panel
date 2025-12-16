@@ -4,8 +4,13 @@ namespace App\Core\Controller\Panel;
 
 use App\Core\Entity\Voucher;
 use App\Core\Enum\CrudTemplateContextEnum;
-use App\Core\Enum\UserRoleEnum;
 use App\Core\Enum\VoucherTypeEnum;
+use App\Core\Event\Voucher\VoucherCreationRequestedEvent;
+use App\Core\Event\Voucher\VoucherCreatedEvent;
+use App\Core\Event\Voucher\VoucherUpdateRequestedEvent;
+use App\Core\Event\Voucher\VoucherUpdatedEvent;
+use App\Core\Event\Voucher\VoucherDeletionRequestedEvent;
+use App\Core\Event\Voucher\VoucherDeletedEvent;
 use App\Core\Service\Crud\PanelCrudService;
 use Doctrine\ORM\EntityManagerInterface;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
@@ -20,21 +25,37 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\IntegerField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\NumberField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextareaField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
+use RuntimeException;
 use Symfony\Contracts\Translation\TranslatorInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
+use App\Core\Enum\PermissionEnum;
 
 
 class VoucherCrudController extends AbstractPanelController
 {
     public function __construct(
         PanelCrudService $panelCrudService,
+        private readonly RequestStack $requestStack,
         private readonly TranslatorInterface $translator,
     ) {
-        parent::__construct($panelCrudService);
+        parent::__construct($panelCrudService, $requestStack);
     }
 
     public static function getEntityFqcn(): string
     {
         return Voucher::class;
+    }
+
+    protected function getPermissionMapping(): array
+    {
+        return [
+            Action::INDEX  => PermissionEnum::ACCESS_VOUCHERS->value,
+            Action::DETAIL => PermissionEnum::VIEW_VOUCHER->value,
+            Action::NEW    => PermissionEnum::CREATE_VOUCHER->value,
+            Action::EDIT   => PermissionEnum::EDIT_VOUCHER->value,
+            Action::DELETE => PermissionEnum::DELETE_VOUCHER->value,
+            'showVoucherUsages' => PermissionEnum::SHOW_VOUCHER_USAGES->value,
+        ];
     }
 
     public function configureFields(string $pageName): iterable
@@ -86,11 +107,12 @@ class VoucherCrudController extends AbstractPanelController
 
     public function configureActions(Actions $actions): Actions
     {
-        return $actions
+        $actions = $actions
             ->remove(Crud::PAGE_NEW, Action::SAVE_AND_ADD_ANOTHER)
             ->remove(Crud::PAGE_EDIT, Action::SAVE_AND_CONTINUE)
-            ->add(Crud::PAGE_INDEX, $this->getShowRedeemedVouchersAction())
-            ;
+            ->add(Crud::PAGE_INDEX, $this->getShowRedeemedVouchersAction());
+
+        return parent::configureActions($actions);
     }
 
     public function configureCrud(Crud $crud): Crud
@@ -100,7 +122,6 @@ class VoucherCrudController extends AbstractPanelController
         $crud
             ->setEntityLabelInSingular($this->translator->trans('pteroca.crud.voucher.voucher'))
             ->setEntityLabelInPlural($this->translator->trans('pteroca.crud.voucher.vouchers'))
-            ->setEntityPermission(UserRoleEnum::ROLE_ADMIN->name)
             ;
 
         return parent::configureCrud($crud);
@@ -138,7 +159,22 @@ class VoucherCrudController extends AbstractPanelController
             $entityInstance->setOneUsePerUser(true);
         }
 
+        // Dispatch VoucherCreationRequestedEvent
+        $request = $this->requestStack->getCurrentRequest();
+        $eventContext = $request ? $this->buildMinimalEventContext($request) : [];
+
+        $creationRequestedEvent = new VoucherCreationRequestedEvent($entityInstance, $eventContext);
+        $creationRequestedEvent = $this->dispatchEvent($creationRequestedEvent);
+
+        if ($creationRequestedEvent->isPropagationStopped()) {
+            throw new RuntimeException($this->translator->trans('pteroca.crud.voucher.creation_blocked'));
+        }
+
         parent::persistEntity($entityManager, $entityInstance);
+
+        // Dispatch VoucherCreatedEvent
+        $createdEvent = new VoucherCreatedEvent($entityInstance, $eventContext);
+        $this->dispatchEvent($createdEvent);
     }
 
     public function updateEntity(EntityManagerInterface $entityManager, $entityInstance): void
@@ -151,7 +187,50 @@ class VoucherCrudController extends AbstractPanelController
             $entityInstance->setOneUsePerUser(true);
         }
 
+        // Dispatch VoucherUpdateRequestedEvent
+        $request = $this->requestStack->getCurrentRequest();
+        $eventContext = $request ? $this->buildMinimalEventContext($request) : [];
+
+        $updateRequestedEvent = new VoucherUpdateRequestedEvent($entityInstance, $eventContext);
+        $updateRequestedEvent = $this->dispatchEvent($updateRequestedEvent);
+
+        if ($updateRequestedEvent->isPropagationStopped()) {
+            throw new RuntimeException($this->translator->trans('pteroca.crud.voucher.update_blocked'));
+        }
+
         parent::updateEntity($entityManager, $entityInstance);
+
+        // Dispatch VoucherUpdatedEvent
+        $updatedEvent = new VoucherUpdatedEvent($entityInstance, $eventContext);
+        $this->dispatchEvent($updatedEvent);
+    }
+
+    public function deleteEntity(EntityManagerInterface $entityManager, $entityInstance): void
+    {
+        if (false === $entityInstance instanceof Voucher) {
+            return;
+        }
+
+        // Dispatch VoucherDeletionRequestedEvent
+        $request = $this->requestStack->getCurrentRequest();
+        $eventContext = $request ? $this->buildMinimalEventContext($request) : [];
+
+        $deletionRequestedEvent = new VoucherDeletionRequestedEvent($entityInstance, $eventContext);
+        $deletionRequestedEvent = $this->dispatchEvent($deletionRequestedEvent);
+
+        if ($deletionRequestedEvent->isPropagationStopped()) {
+            throw new RuntimeException($this->translator->trans('pteroca.crud.voucher.deletion_blocked'));
+        }
+
+        // Store voucher data before deletion
+        $voucherId = $entityInstance->getId();
+        $voucherCode = $entityInstance->getCode();
+
+        parent::deleteEntity($entityManager, $entityInstance);
+
+        // Dispatch VoucherDeletedEvent
+        $deletedEvent = new VoucherDeletedEvent($voucherId, $voucherCode, $eventContext);
+        $this->dispatchEvent($deletedEvent);
     }
 
     private function getShowRedeemedVouchersAction(): Action
@@ -173,6 +252,6 @@ class VoucherCrudController extends AbstractPanelController
                     ]
                 ]
             )
-        );
+        )->displayIf(fn (Voucher $entity) => $this->getUser()?->hasPermission(PermissionEnum::SHOW_VOUCHER_USAGES));
     }
 }

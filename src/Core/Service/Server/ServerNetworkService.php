@@ -7,9 +7,24 @@ use App\Core\DTO\Action\Result\ServerAllocationActionResult;
 use App\Core\Entity\Server;
 use App\Core\Enum\ServerLogActionEnum;
 use App\Core\Service\Logs\ServerLogService;
-use App\Core\Service\Pterodactyl\PterodactylClientService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use Exception;
 use Symfony\Contracts\Translation\TranslatorInterface;
+use App\Core\Event\Server\Network\ServerAllocationCreatedEvent;
+use App\Core\Event\Server\Network\ServerAllocationCreationFailedEvent;
+use App\Core\Event\Server\Network\ServerAllocationCreationRequestedEvent;
+use App\Core\Event\Server\Network\ServerAllocationDeletedEvent;
+use App\Core\Event\Server\Network\ServerAllocationDeletionFailedEvent;
+use App\Core\Event\Server\Network\ServerAllocationDeletionRequestedEvent;
+use App\Core\Event\Server\Network\ServerAllocationEditedEvent;
+use App\Core\Event\Server\Network\ServerAllocationEditFailedEvent;
+use App\Core\Event\Server\Network\ServerAllocationEditRequestedEvent;
+use App\Core\Event\Server\Network\ServerAllocationPrimaryChangedEvent;
+use App\Core\Event\Server\Network\ServerAllocationPrimaryChangeFailedEvent;
+use App\Core\Event\Server\Network\ServerAllocationPrimaryChangeRequestedEvent;
+use App\Core\Service\Event\EventContextService;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
 class ServerNetworkService
 {
@@ -18,9 +33,12 @@ class ServerNetworkService
     private const DELETE_PRIMARY_ALLOCATION_ERROR = 'You cannot delete the primary allocation for this server.';
 
     public function __construct(
-        private readonly PterodactylClientService $pterodactylClientService,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
         private readonly ServerLogService $serverLogService,
         private readonly TranslatorInterface $translator,
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly RequestStack $requestStack,
+        private readonly EventContextService $eventContextService,
     ) {}
 
     public function createAllocation(
@@ -28,14 +46,31 @@ class ServerNetworkService
         UserInterface $user,
     ): ServerAllocationActionResult
     {
-        $endpointUrl = $this->getEndpointUrl($server, null);
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerAllocationCreationRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Allocation creation was blocked';
+            return new ServerAllocationActionResult(
+                success: false,
+                server: $server,
+                error: $reason,
+            );
+        }
 
         try {
-            $this->pterodactylClientService
-                ->getApi($user)
-                ->servers
-                ->http
-                ->post($endpointUrl);
+            $this->pterodactylApplicationService
+                ->getClientApi($user)
+                ->network()
+                ->assignAllocation($server);
         } catch (Exception $exception) {
             $errorObject = json_decode($exception->getMessage(), true)['errors'][0] ?? null;
             $errorDetail = $errorObject['detail'] ?? null;
@@ -53,6 +88,15 @@ class ServerNetworkService
         }
 
         if (!empty($errorDetail)) {
+            $failedEvent = new ServerAllocationCreationFailedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $errorDetail,
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
             return new ServerAllocationActionResult(
                 success: false,
                 server: $server,
@@ -66,6 +110,14 @@ class ServerNetworkService
             ServerLogActionEnum::CREATE_ALLOCATION,
         );
 
+        $createdEvent = new ServerAllocationCreatedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $context
+        );
+        $this->eventDispatcher->dispatch($createdEvent);
+
         return new ServerAllocationActionResult(
             success: true,
             server: $server,
@@ -78,14 +130,32 @@ class ServerNetworkService
         int $allocationId,
     ): ServerAllocationActionResult
     {
-        $endpointUrl = $this->getEndpointUrl($server, $allocationId, 'primary');
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerAllocationPrimaryChangeRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $allocationId,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Primary allocation change was blocked';
+            return new ServerAllocationActionResult(
+                success: false,
+                server: $server,
+                error: $reason,
+            );
+        }
 
         try {
-            $this->pterodactylClientService
-                ->getApi($user)
-                ->servers
-                ->http
-                ->post($endpointUrl);
+            $this->pterodactylApplicationService
+                ->getClientApi($user)
+                ->network()
+                ->setPrimaryAllocation($server, $allocationId);
         } catch (Exception $exception) {
             $errorDetail = sprintf(
                 '%s: %s',
@@ -95,6 +165,16 @@ class ServerNetworkService
         }
 
         if (!empty($errorDetail)) {
+            $failedEvent = new ServerAllocationPrimaryChangeFailedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $allocationId,
+                $errorDetail,
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
             return new ServerAllocationActionResult(
                 success: false,
                 server: $server,
@@ -111,6 +191,15 @@ class ServerNetworkService
             ]
         );
 
+        $changedEvent = new ServerAllocationPrimaryChangedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $allocationId,
+            $context
+        );
+        $this->eventDispatcher->dispatch($changedEvent);
+
         return new ServerAllocationActionResult(
             success: true,
             server: $server,
@@ -124,16 +213,33 @@ class ServerNetworkService
         string $notes,
     ): ServerAllocationActionResult
     {
-        $endpointUrl = $this->getEndpointUrl($server, $allocationId);
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerAllocationEditRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $allocationId,
+            $notes,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Allocation edit was blocked';
+            return new ServerAllocationActionResult(
+                success: false,
+                server: $server,
+                error: $reason,
+            );
+        }
 
         try {
-            $this->pterodactylClientService
-                ->getApi($user)
-                ->servers
-                ->http
-                ->post($endpointUrl, [
-                    'notes' => $notes,
-                ]);
+            $this->pterodactylApplicationService
+                ->getClientApi($user)
+                ->network()
+                ->updateAllocationNotes($server, $allocationId, $notes);
         } catch (Exception $exception) {
             $errorDetail = sprintf(
                 '%s: %s',
@@ -143,6 +249,17 @@ class ServerNetworkService
         }
 
         if (!empty($errorDetail)) {
+            $failedEvent = new ServerAllocationEditFailedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $allocationId,
+                $notes,
+                $errorDetail,
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
             return new ServerAllocationActionResult(
                 success: false,
                 server: $server,
@@ -160,6 +277,16 @@ class ServerNetworkService
             ]
         );
 
+        $editedEvent = new ServerAllocationEditedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $allocationId,
+            $notes,
+            $context
+        );
+        $this->eventDispatcher->dispatch($editedEvent);
+
         return new ServerAllocationActionResult(
             success: true,
             server: $server,
@@ -172,14 +299,32 @@ class ServerNetworkService
         int $allocationId,
     ): ServerAllocationActionResult
     {
-        $endpointUrl = $this->getEndpointUrl($server, $allocationId);
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerAllocationDeletionRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $allocationId,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Allocation deletion was blocked';
+            return new ServerAllocationActionResult(
+                success: false,
+                server: $server,
+                error: $reason,
+            );
+        }
 
         try {
-            $this->pterodactylClientService
-                ->getApi($user)
-                ->servers
-                ->http
-                ->delete($endpointUrl);
+            $this->pterodactylApplicationService
+                ->getClientApi($user)
+                ->network()
+                ->removeAllocation($server, $allocationId);
         } catch (Exception $exception) {
             $errorObject = json_decode($exception->getMessage(), true)['errors'][0] ?? null;
             $errorDetail = $errorObject['detail'] ?? null;
@@ -196,6 +341,16 @@ class ServerNetworkService
         }
 
         if (!empty($errorDetail)) {
+            $failedEvent = new ServerAllocationDeletionFailedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $allocationId,
+                $errorDetail,
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
             return new ServerAllocationActionResult(
                 success: false,
                 server: $server,
@@ -212,35 +367,18 @@ class ServerNetworkService
             ]
         );
 
+        $deletedEvent = new ServerAllocationDeletedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $allocationId,
+            $context
+        );
+        $this->eventDispatcher->dispatch($deletedEvent);
+
         return new ServerAllocationActionResult(
             success: true,
             server: $server,
         );
-    }
-
-    private function getEndpointUrl(Server $server, ?int $allocationId, string $additionalUri = ''): string
-    {
-        $endpointUrl = sprintf(
-            'servers/%s/network/allocations',
-            $server->getPterodactylServerIdentifier(),
-        );
-
-        if (!empty($allocationId)) {
-            $endpointUrl = sprintf(
-                '%s/%d',
-                $endpointUrl,
-                $allocationId,
-            );
-        }
-
-        if (!empty($additionalUri)) {
-            $endpointUrl = sprintf(
-                '%s/%s',
-                $endpointUrl,
-                $additionalUri,
-            );
-        }
-
-        return $endpointUrl;
     }
 }

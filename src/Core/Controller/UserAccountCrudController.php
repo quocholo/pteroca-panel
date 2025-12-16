@@ -2,13 +2,15 @@
 
 namespace App\Core\Controller;
 
-use App\Core\Contract\UserInterface;
 use App\Core\Controller\Panel\AbstractPanelController;
 use App\Core\Entity\Panel\UserAccount;
 use App\Core\Enum\CrudTemplateContextEnum;
-use App\Core\Enum\UserRoleEnum;
+use App\Core\Enum\PermissionEnum;
+use App\Core\Event\User\Account\PterodactylAccountSyncedEvent;
+use App\Core\Event\User\Account\UserAccountUpdateRequestedEvent;
+use App\Core\Event\User\Account\UserAccountUpdatedEvent;
 use App\Core\Service\Crud\PanelCrudService;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\QueryBuilder;
 use EasyCorp\Bundle\EasyAdminBundle\Collection\FieldCollection;
@@ -16,6 +18,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Collection\FilterCollection;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
+use EasyCorp\Bundle\EasyAdminBundle\Config\KeyValueStore;
 use EasyCorp\Bundle\EasyAdminBundle\Context\AdminContext;
 use EasyCorp\Bundle\EasyAdminBundle\Dto\EntityDto;
 use EasyCorp\Bundle\EasyAdminBundle\Dto\SearchDto;
@@ -24,24 +27,42 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\FormField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\IdField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\ImageField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
+use InvalidArgumentException;
+use Psr\Container\ContainerExceptionInterface;
+use Psr\Container\NotFoundExceptionInterface;
+use RuntimeException;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 use Symfony\Component\Validator\Constraints\Image;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
 class UserAccountCrudController extends AbstractPanelController
 {
+    protected bool $useConventionBasedPermissions = false;
+
     public function __construct(
         private readonly UserPasswordHasherInterface $passwordHasher,
         private readonly TranslatorInterface $translator,
-        private readonly PterodactylService $pterodactylService,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
         PanelCrudService $panelCrudService,
+        RequestStack $requestStack,
     ) {
-        parent::__construct($panelCrudService);
+        parent::__construct($panelCrudService, $requestStack);
     }
 
     public static function getEntityFqcn(): string
     {
         return UserAccount::class;
+    }
+
+    protected function getPermissionMapping(): array
+    {
+        return [
+            Action::INDEX => PermissionEnum::EDIT_USER_ACCOUNT->value,
+            Action::EDIT  => PermissionEnum::EDIT_USER_ACCOUNT->value,
+        ];
     }
 
     public function configureActions(Actions $actions): Actions
@@ -105,9 +126,11 @@ class UserAccountCrudController extends AbstractPanelController
         $this->appendCrudTemplateContext(CrudTemplateContextEnum::USER_ACCOUNT->value);
 
         $crud
+            ->setEntityPermission(PermissionEnum::EDIT_USER_ACCOUNT->value)
             ->setEntityLabelInSingular($this->translator->trans('pteroca.dashboard.account_settings'))
             ->setEntityLabelInPlural($this->translator->trans('pteroca.dashboard.account_settings'))
-            ->setEntityPermission(UserRoleEnum::ROLE_USER->name);
+            ->setHelp('edit', $this->translator->trans('pteroca.crud.user_account.description'))
+            ->setSearchFields(null);
 
         return parent::configureCrud($crud);
     }
@@ -115,13 +138,13 @@ class UserAccountCrudController extends AbstractPanelController
     public function createIndexQueryBuilder(SearchDto $searchDto, EntityDto $entityDto, FieldCollection $fields, FilterCollection $filters): QueryBuilder
     {
         $queryBuilder = parent::createIndexQueryBuilder($searchDto, $entityDto, $fields, $filters);
-        $queryBuilder->where('entity.email = :email');
+        $queryBuilder->andWhere('entity.email = :email');
         $queryBuilder->setParameter('email', $this->getUser()->getEmail());
 
         return $queryBuilder;
     }
 
-    public function index(AdminContext $context)
+    public function index(AdminContext $context): KeyValueStore|RedirectResponse|Response
     {
         $user = $this->getUser();
 
@@ -136,30 +159,54 @@ class UserAccountCrudController extends AbstractPanelController
         ]);
     }
 
-    public function edit(AdminContext $context)
+    public function edit(AdminContext $context): KeyValueStore|RedirectResponse|Response
     {
         return $this->validateAccount($context);
     }
 
+    /**
+     * @throws ContainerExceptionInterface
+     * @throws NotFoundExceptionInterface
+     */
     public function updateEntity(EntityManagerInterface $entityManager, $entityInstance): void
     {
         if ($entityInstance instanceof UserAccount) {
-            // Sprawdź, czy hasła się zgadzają
+            // Get request and build context
+            $request = $this->container->get('request_stack')->getCurrentRequest();
+            $eventContext = $request ? $this->buildMinimalEventContext($request) : [];
+
+            // Check if passwords match
             if ($entityInstance->getPlainPassword() && $entityInstance->getRepeatPassword()) {
                 if ($entityInstance->getPlainPassword() !== $entityInstance->getRepeatPassword()) {
-                    throw new \InvalidArgumentException($this->translator->trans('pteroca.crud.user.passwords_must_match'));
+                    throw new InvalidArgumentException($this->translator->trans('pteroca.crud.user.passwords_must_match'));
                 }
             }
 
-            if ($plainPassword = $entityInstance->getPlainPassword()) {
-                $hashedPassword = $this->passwordHasher->hashPassword($entityInstance, $plainPassword);
-                $entityInstance->setPassword($hashedPassword);
+            $plainPassword = $entityInstance->getPlainPassword();
+
+            // Dispatch UserAccountUpdateRequestedEvent
+            $updateRequestedEvent = new UserAccountUpdateRequestedEvent(
+                $entityInstance,
+                $plainPassword,
+                $eventContext
+            );
+            $updateRequestedEvent = $this->dispatchEvent($updateRequestedEvent);
+
+            if ($updateRequestedEvent->isPropagationStopped()) {
+                throw new RuntimeException($this->translator->trans('pteroca.crud.user.update_blocked'));
             }
 
-            $pterodactylAccount = $this->pterodactylService
-                ->getApi()
-                ->users
-                ->get($entityInstance->getPterodactylUserId());
+            $passwordWasChanged = false;
+            if ($plainPassword) {
+                $hashedPassword = $this->passwordHasher->hashPassword($entityInstance, $plainPassword);
+                $entityInstance->setPassword($hashedPassword);
+                $passwordWasChanged = true;
+            }
+
+            $pterodactylAccount = $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->users()
+                ->getUser($entityInstance->getPterodactylUserId());
             if (!empty($pterodactylAccount->username)) {
                 $pterodactylAccountDetails = [
                     'username' => $pterodactylAccount->username,
@@ -170,17 +217,40 @@ class UserAccountCrudController extends AbstractPanelController
                 if ($plainPassword) {
                     $pterodactylAccountDetails['password'] = $plainPassword;
                 }
-                $this->pterodactylService->getApi()->users->update(
-                    $entityInstance->getPterodactylUserId(),
-                    $pterodactylAccountDetails
-                );
-            }
-        }
+                $this->pterodactylApplicationService
+                    ->getApplicationApi()
+                    ->users()
+                    ->updateUser(
+                        $entityInstance->getPterodactylUserId(),
+                        $pterodactylAccountDetails
+                    );
 
-        parent::updateEntity($entityManager, $entityInstance);
+                // Dispatch PterodactylAccountSyncedEvent
+                $pterodactylSyncedEvent = new PterodactylAccountSyncedEvent(
+                    $entityInstance,
+                    $entityInstance->getPterodactylUserId(),
+                    $plainPassword !== null,
+                    $eventContext
+                );
+                $this->dispatchEvent($pterodactylSyncedEvent);
+            }
+
+            // Call parent to handle the CrudEntity events
+            parent::updateEntity($entityManager, $entityInstance);
+
+            // Dispatch UserAccountUpdatedEvent
+            $accountUpdatedEvent = new UserAccountUpdatedEvent(
+                $entityInstance,
+                $passwordWasChanged,
+                $eventContext
+            );
+            $this->dispatchEvent($accountUpdatedEvent);
+        } else {
+            parent::updateEntity($entityManager, $entityInstance);
+        }
     }
 
-    private function validateAccount(AdminContext $context)
+    private function validateAccount(AdminContext $context): KeyValueStore|RedirectResponse|Response
     {
         $user = $this->getUser();
         if (empty($user)) {

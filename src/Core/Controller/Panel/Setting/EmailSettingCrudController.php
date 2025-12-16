@@ -2,6 +2,7 @@
 
 namespace App\Core\Controller\Panel\Setting;
 
+use App\Core\Enum\PermissionEnum;
 use App\Core\Enum\SettingContextEnum;
 use App\Core\Enum\SettingEnum;
 use App\Core\Repository\SettingRepository;
@@ -9,10 +10,13 @@ use App\Core\Repository\SettingOptionRepository;
 use App\Core\Service\Crud\PanelCrudService;
 use App\Core\Service\LocaleService;
 use App\Core\Service\SettingService;
+use App\Core\Service\SettingTypeMapperService;
 use App\Core\Service\System\WebConfigurator\EmailConnectionVerificationService;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
+use Exception;
+use InvalidArgumentException;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Routing\Annotation\Route;
@@ -28,16 +32,15 @@ class EmailSettingCrudController extends AbstractSettingCrudController
         SettingOptionRepository $settingOptionRepository,
         SettingService $settingService,
         LocaleService $localeService,
+        SettingTypeMapperService $typeMapper,
         private readonly EmailConnectionVerificationService $emailConnectionVerificationService,
     ) {
-        parent::__construct($panelCrudService, $requestStack, $translator, $settingRepository, $settingOptionRepository, $settingService, $localeService);
+        parent::__construct($panelCrudService, $requestStack, $translator, $settingRepository, $settingOptionRepository, $settingService, $localeService, $typeMapper);
     }
 
-    public function configureCrud(Crud $crud): Crud
+    protected function getSettingContext(): SettingContextEnum
     {
-        $this->context = SettingContextEnum::EMAIL;
-
-        return parent::configureCrud($crud);
+        return SettingContextEnum::EMAIL;
     }
 
     public function configureActions(Actions $actions): Actions
@@ -45,7 +48,8 @@ class EmailSettingCrudController extends AbstractSettingCrudController
         $testSmtpAction = Action::new('testSmtpConnection', $this->translator->trans('pteroca.crud.setting.test_smtp_connection'))
             ->linkToRoute('admin_email_test_smtp')
             ->setIcon('fa fa-envelope-circle-check')
-            ->setCssClass('btn btn-info')
+            ->setCssClass('btn info')
+            ->displayIf(fn () => $this->getUser()?->hasPermission(PermissionEnum::EDIT_SETTINGS_EMAIL))
             ->createAsGlobalAction();
 
         $actions = parent::configureActions($actions);
@@ -64,7 +68,7 @@ class EmailSettingCrudController extends AbstractSettingCrudController
             $smtpPassword = $this->settingRepository->getSetting(SettingEnum::EMAIL_SMTP_PASSWORD);
 
             if (empty($smtpServer) || empty($smtpPort) || empty($smtpUsername) || empty($smtpPassword)) {
-                throw new \InvalidArgumentException('Missing SMTP configuration');
+                throw new InvalidArgumentException('Missing SMTP configuration');
             }
 
             $result = $this->emailConnectionVerificationService->validateConnection(
@@ -80,7 +84,7 @@ class EmailSettingCrudController extends AbstractSettingCrudController
                 $this->addFlash('danger', $this->translator->trans('pteroca.crud.setting.smtp_connection_failed'));
             }
 
-        } catch (\Exception $e) {
+        } catch (Exception) {
             $this->addFlash('danger', $this->translator->trans('pteroca.crud.setting.smtp_connection_failed'));
         }
 

@@ -28,7 +28,7 @@
                         </div>
                     {% endif %}
                     <div class="col-4">
-                        <button type="button" class="btn btn-danger w-100" {% if not server.isSuspended %}onclick="reinstallServer()"{% else %}disabled{% endif %}>
+                        <button type="button" class="btn danger w-100 p-4" {% if not server.isSuspended %}onclick="reinstallServer()"{% else %}disabled{% endif %}>
                             {{ 'pteroca.server.reinstall_server'|trans }}
                         </button>
                     </div>
@@ -56,12 +56,16 @@
                     key: eggId,
                     value: 0,
                 })
-            }).then(response => {
+            }).then(async response => {
+                const data = await response.json().catch(() => ({}));
+
                 if (!response.ok) {
-                    alert('{{ 'pteroca.server.data_update_error'|trans }}');
+                    alert(data.error || '{{ 'pteroca.server.data_update_error'|trans }}');
                 } else {
                     location.reload();
                 }
+            }).catch(error => {
+                alert('{{ 'pteroca.server.data_update_error'|trans }}');
             })
         }
     </script>

@@ -3,12 +3,13 @@
 namespace App\Core\Service\Server\ServerConfiguration;
 
 use App\Core\Entity\Server;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
+use Exception;
 
-class ServerConfigurationStartupService
+readonly class ServerConfigurationStartupService
 {
     public function __construct(
-        private readonly PterodactylService $pterodactylService,
+        private PterodactylApplicationService $pterodactylApplicationService,
     )
     {
     }
@@ -18,15 +19,18 @@ class ServerConfigurationStartupService
         array $startupPayload,
     ): void
     {
-        $this->pterodactylService
-            ->getApi()
-            ->servers
-            ->updateStartup(
+        $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->servers()
+            ->updateServerStartup(
                 $server->getPterodactylServerId(),
                 $startupPayload,
             );
     }
 
+    /**
+     * @throws Exception
+     */
     public function getStartupPayload(string $variableKey, string $variableValue, array $serverDetails): array
     {
         $preparedPayload = [
@@ -38,11 +42,25 @@ class ServerConfigurationStartupService
         ];
 
         if (!isset($preparedPayload[$variableKey])) {
-            throw new \Exception('Invalid variable key');
+            throw new Exception('Invalid variable key');
         }
 
         $preparedPayload[$variableKey] = $variableValue;
 
         return $preparedPayload;
+    }
+
+    public function getEnvironmentVariablePayload(string $variableKey, string $variableValue, array $serverDetails): array
+    {
+        $environment = $serverDetails['container']['environment'];
+        $environment[$variableKey] = $variableValue;
+
+        return [
+            'startup' => $serverDetails['container']['startup_command'],
+            'egg' => $serverDetails['egg'],
+            'environment' => $environment,
+            'image' => $serverDetails['container']['image'],
+            'skip_scripts' => false,
+        ];
     }
 }

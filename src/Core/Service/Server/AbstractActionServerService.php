@@ -7,8 +7,10 @@ use App\Core\Contract\ProductPriceInterface;
 use App\Core\Contract\UserInterface;
 use App\Core\Repository\UserRepository;
 use App\Core\Service\Product\ProductPriceCalculatorService;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use App\Core\Service\Voucher\VoucherPaymentService;
+use Exception;
+use InvalidArgumentException;
 use Symfony\Contracts\Translation\TranslatorInterface;
 use Psr\Log\LoggerInterface;
 
@@ -16,10 +18,10 @@ abstract class AbstractActionServerService
 {
     public function __construct(
         private readonly UserRepository $userRepository,
-        private readonly PterodactylService $pterodactylService,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
         private readonly VoucherPaymentService $voucherPaymentService,
-        private readonly ProductPriceCalculatorService $productPriceCalculatorService,
-        private readonly TranslatorInterface $translator,
+        protected readonly ProductPriceCalculatorService $productPriceCalculatorService,
+        protected readonly TranslatorInterface $translator,
         protected readonly LoggerInterface $logger,
     ) {}
 
@@ -36,7 +38,7 @@ abstract class AbstractActionServerService
         )->first() ?: null;
 
         if (empty($price)) {
-            throw new \InvalidArgumentException($this->translator->trans('pteroca.store.price_not_found'));
+            throw new InvalidArgumentException($this->translator->trans('pteroca.store.price_not_found'));
         }
 
         $balancePaymentAmount = $this->productPriceCalculatorService->calculateFinalPrice($price, $slots);
@@ -48,7 +50,7 @@ abstract class AbstractActionServerService
                     $voucherCode,
                     $user,
                 );
-            } catch (\Exception $exception) {
+            } catch (Exception $exception) {
                 $this->logger->error('Failed to redeem payment voucher', [
                     'user' => $user->getId(),
                     'voucherCode' => $voucherCode,
@@ -58,7 +60,7 @@ abstract class AbstractActionServerService
         }
 
         if ($balancePaymentAmount > $user->getBalance()) {
-            throw new \InvalidArgumentException($this->translator->trans('pteroca.store.not_enough_funds'));
+            throw new InvalidArgumentException($this->translator->trans('pteroca.store.not_enough_funds'));
         }
 
         $user->setBalance($user->getBalance() - $balancePaymentAmount);
@@ -67,6 +69,9 @@ abstract class AbstractActionServerService
 
     protected function getPterodactylAccountLogin(UserInterface $user): ?string
     {
-        return $this->pterodactylService->getApi()->users->get($user->getPterodactylUserId())?->username;
+        return $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->users()
+            ->getUser($user->getPterodactylUserId())?->get('username') ?? null;
     }
 }

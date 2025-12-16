@@ -10,9 +10,12 @@ use App\Core\Enum\LogActionEnum;
 use App\Core\Enum\PaymentStatusEnum;
 use App\Core\Enum\SettingEnum;
 use App\Core\Enum\VoucherTypeEnum;
+use App\Core\Event\Balance\BalanceAboutToBeAddedEvent;
+use App\Core\Event\Balance\BalanceAddedEvent;
+use App\Core\Event\Balance\BalancePaymentValidatedEvent;
+use App\Core\Event\Balance\PaymentFinalizedEvent;
 use App\Core\Exception\PaymentExpiredException;
 use App\Core\Message\SendEmailMessage;
-use App\Core\Provider\Payment\PaymentProviderInterface;
 use App\Core\Repository\PaymentRepository;
 use App\Core\Repository\UserRepository;
 use App\Core\Service\Authorization\UserVerificationService;
@@ -20,24 +23,31 @@ use App\Core\Service\Email\EmailNotificationService;
 use App\Core\Service\Logs\LogService;
 use App\Core\Service\SettingService;
 use App\Core\Service\Voucher\VoucherPaymentService;
+use Exception;
+use Symfony\Component\Messenger\Exception\ExceptionInterface;
 use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
-class PaymentService
+readonly class PaymentService
 {
     public function __construct(
-        private readonly PaymentProviderInterface $paymentProvider,
-        private readonly PaymentRepository $paymentRepository,
-        private readonly UserRepository $userRepository,
-        private readonly TranslatorInterface $translator,
-        private readonly MessageBusInterface $messageBus,
-        private readonly SettingService $settingService,
-        private readonly LogService $logService,
-        private readonly UserVerificationService $userVerificationService,
-        private readonly VoucherPaymentService $voucherPaymentService,
-        private readonly EmailNotificationService $emailNotificationService,
+        private PaymentGatewayManager    $gatewayManager,
+        private PaymentRepository        $paymentRepository,
+        private UserRepository           $userRepository,
+        private TranslatorInterface      $translator,
+        private MessageBusInterface      $messageBus,
+        private SettingService           $settingService,
+        private LogService               $logService,
+        private UserVerificationService  $userVerificationService,
+        private VoucherPaymentService    $voucherPaymentService,
+        private EmailNotificationService $emailNotificationService,
+        private EventDispatcherInterface $eventDispatcher,
     ) {}
 
+    /**
+     * @throws Exception
+     */
     public function createPayment(
         UserInterface $user,
         float $amount,
@@ -45,9 +55,26 @@ class PaymentService
         string $voucherCode,
         string $successUrl,
         string $cancelUrl,
+        string $gateway = 'stripe',
     ): string
     {
         $this->userVerificationService->validateUserVerification($user);
+
+        // Get the payment provider from the manager
+        $paymentProvider = $this->gatewayManager->getProvider($gateway);
+        if ($paymentProvider === null) {
+            throw new Exception($this->translator->trans('pteroca.payment.gateway_not_found'));
+        }
+
+        if (!$paymentProvider->isConfigured()) {
+            throw new Exception($this->translator->trans('pteroca.payment.gateway_not_configured'));
+        }
+
+        // Validate currency support
+        if (!in_array($currency, $paymentProvider->getSupportedCurrencies(), true)) {
+            throw new Exception($this->translator->trans('pteroca.payment.currency_not_supported'));
+        }
+
         $balanceAmount = $amount;
         if (!empty($voucherCode)) {
             $this->voucherPaymentService->validateVoucherCode(
@@ -58,9 +85,9 @@ class PaymentService
             $amount = $this->voucherPaymentService->redeemPaymentVoucher($amount, $voucherCode, $user);
         }
 
-        $session = $this->paymentProvider->createSession($amount, $currency, $successUrl, $cancelUrl);
+        $session = $paymentProvider->createSession($amount, $currency, $successUrl, $cancelUrl);
         if (empty($session)) {
-            throw new \Exception($this->translator->trans('pteroca.recharge.failed_to_create_payment'));
+            throw new Exception($this->translator->trans('pteroca.recharge.failed_to_create_payment'));
         }
 
         $this->logService->logAction(
@@ -72,23 +99,39 @@ class PaymentService
                 'sessionId' => $session->getId(),
                 'balanceAmount' => $balanceAmount,
                 'voucherCode' => $voucherCode,
+                'gateway' => $gateway,
             ]
         );
-        $this->savePaymentSession($user, $session, $balanceAmount, $voucherCode);
+        $this->savePaymentSession($user, $session, $balanceAmount, $voucherCode, $gateway);
 
         return $session->getUrl();
     }
 
+    /**
+     * @throws PaymentExpiredException
+     * @throws Exception
+     */
     public function continuePayment(
         string $sessionId,
     ): string
     {
-        $retrievedSession = $this->paymentProvider->retrieveSession($sessionId);
+        /** @var Payment|null $payment */
+        $payment = $this->paymentRepository->findOneBy(['sessionId' => $sessionId]);
+        if (empty($payment)) {
+            throw new Exception($this->translator->trans('pteroca.recharge.payment_not_found'));
+        }
+
+        $paymentProvider = $this->gatewayManager->getProvider($payment->getGateway());
+        if ($paymentProvider === null) {
+            throw new Exception($this->translator->trans('pteroca.payment.gateway_not_found'));
+        }
+
+        $retrievedSession = $paymentProvider->retrieveSession($sessionId);
         if ($retrievedSession === null) {
-            throw new \Exception($this->translator->trans('pteroca.recharge.payment_not_found'));
+            throw new Exception($this->translator->trans('pteroca.recharge.payment_not_found'));
         }
         if ($retrievedSession->getPaymentStatus() === PaymentStatusEnum::PAID->value) {
-            throw new \Exception($this->translator->trans('pteroca.recharge.payment_already_processed'));
+            throw new Exception($this->translator->trans('pteroca.recharge.payment_already_processed'));
         }
 
         $url = $retrievedSession->getUrl();
@@ -99,35 +142,80 @@ class PaymentService
         return $url;
     }
 
+    /**
+     * @throws ExceptionInterface
+     */
     public function finalizePayment(UserInterface $user, string $sessionId): ?string
     {
-        $session = $this->paymentProvider->retrieveSession($sessionId);
-        if (empty($session)) {
+        /** @var Payment|null $payment */
+        $payment = $this->paymentRepository->findOneBy(['sessionId' => $sessionId]);
+        if (empty($payment)) {
             return $this->translator->trans('pteroca.recharge.payment_not_found');
         }
 
-        /** @var Payment|null $payment */
-        $payment = $this->paymentRepository->findOneBy(['sessionId' => $sessionId]);
-        if (empty($payment)) {;
+        $paymentProvider = $this->gatewayManager->getProvider($payment->getGateway());
+        if ($paymentProvider === null) {
+            return $this->translator->trans('pteroca.payment.gateway_not_found');
+        }
+
+        $session = $paymentProvider->retrieveSession($sessionId);
+        if (empty($session)) {
             return $this->translator->trans('pteroca.recharge.payment_not_found');
         }
+        
+        $validatedEvent = new BalancePaymentValidatedEvent(
+            $user->getId(),
+            $sessionId,
+            $payment->getBalanceAmount(),
+            $session->getCurrency(),
+            $session->getPaymentStatus()
+        );
+        $this->eventDispatcher->dispatch($validatedEvent);
 
         if ($payment->getStatus() === $session->getPaymentStatus()) {
             return $this->translator->trans('pteroca.recharge.payment_already_processed');
         }
 
-        if ($session->getPaymentStatus() === $this->paymentProvider::PAID_STATUS) {
+        if ($session->getPaymentStatus() === $paymentProvider::PAID_STATUS) {
             $amount = $payment->getBalanceAmount();
-            $newBalance = $user->getBalance() + $amount;
-            $user->setBalance($newBalance);
+            $oldBalance = $user->getBalance();
+            $newBalance = $oldBalance + $amount;
+            
+            $aboutToBeAddedEvent = new BalanceAboutToBeAddedEvent(
+                $user->getId(),
+                $amount,
+                $oldBalance,
+                $newBalance
+            );
+            $this->eventDispatcher->dispatch($aboutToBeAddedEvent);
+            
+            if ($aboutToBeAddedEvent->isPropagationStopped()) {
+                return $aboutToBeAddedEvent->getRejectionReason() 
+                    ?? $this->translator->trans('pteroca.recharge.payment_rejected_by_plugin');
+            }
+            
+            $finalAmount = $aboutToBeAddedEvent->getAmount();
+            $finalNewBalance = $oldBalance + $finalAmount;
+            
+            $user->setBalance($finalNewBalance);
             $this->userRepository->save($user);
+            
+            $balanceAddedEvent = new BalanceAddedEvent(
+                $user->getId(),
+                $finalAmount,
+                $oldBalance,
+                $finalNewBalance,
+                $payment->getId(),
+                $session->getCurrency()
+            );
+            $this->eventDispatcher->dispatch($balanceAddedEvent);
 
             $emailMessage = new SendEmailMessage(
                 $user->getEmail(),
                 $this->translator->trans('pteroca.email.payment.subject'),
                 'email/payment_success.html.twig',
                 [
-                    'amount' => $amount,
+                    'amount' => $finalAmount,
                     'currency' => $session->getCurrency(),
                     'internalCurrency' => $this->settingService
                         ->getSetting(SettingEnum::INTERNAL_CURRENCY_NAME->value),
@@ -146,12 +234,22 @@ class PaymentService
             $this->logService->logAction(
                 $user,
                 LogActionEnum::BOUGHT_BALANCE,
-                ['amount' => $amount, 'currency' => $session->getCurrency(), 'newBalance' => $newBalance]
+                ['amount' => $finalAmount, 'currency' => $session->getCurrency(), 'newBalance' => $finalNewBalance]
             );
         }
 
         $payment->setStatus($session->getPaymentStatus());
         $this->paymentRepository->save($payment);
+        
+        $paymentFinalizedEvent = new PaymentFinalizedEvent(
+            $payment->getId(),
+            $user->getId(),
+            $payment->getAmount(),
+            $session->getCurrency(),
+            $payment->getBalanceAmount(),
+            $sessionId
+        );
+        $this->eventDispatcher->dispatch($paymentFinalizedEvent);
 
         return null;
     }
@@ -172,6 +270,7 @@ class PaymentService
         PaymentSessionDTO $session,
         float $balanceAmount,
         string $voucherCode,
+        string $gateway,
     ): void {
         if (!empty($voucherCode)) {
             $voucher = $this->voucherPaymentService->getVoucher($voucherCode);
@@ -183,6 +282,7 @@ class PaymentService
             ->setBalanceAmount($balanceAmount)
             ->setSessionId($session->getId())
             ->setUser($user)
+            ->setGateway($gateway)
             ->setStatus($session->getPaymentStatus());
 
         if (!empty($voucher)) {

@@ -2,7 +2,6 @@
 
 namespace App\Core\Service\Mailer;
 
-use App\Core\Contract\UserInterface;
 use App\Core\DTO\Email\ServerSuspensionContextDTO;
 use App\Core\Entity\Server;
 use App\Core\Enum\EmailTypeEnum;
@@ -13,22 +12,30 @@ use App\Core\Service\Pterodactyl\PterodactylRedirectService;
 use App\Core\Service\Server\ServerService;
 use App\Core\Service\SettingService;
 use DateTimeImmutable;
+use Exception;
+use Psr\Cache\InvalidArgumentException;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Messenger\Exception\ExceptionInterface;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
-class ServerSuspensionEmailService
+readonly class ServerSuspensionEmailService
 {
     public function __construct(
-        private readonly SettingService $settingService,
-        private readonly TranslatorInterface $translator,
-        private readonly MessageBusInterface $messageBus,
-        private readonly LoggerInterface $logger,
-        private readonly EmailNotificationService $emailNotificationService,
-        private readonly ServerService $serverService,
-        private readonly PterodactylRedirectService $pterodactylRedirectService,
+        private SettingService           $settingService,
+        private TranslatorInterface      $translator,
+        private MessageBusInterface      $messageBus,
+        private LoggerInterface          $logger,
+        private EmailNotificationService $emailNotificationService,
+        private ServerService            $serverService,
+        private PterodactylRedirectService $pterodactylRedirectService,
     ) {}
 
+    /**
+     * @throws Exception
+     * @throws ExceptionInterface
+     * @throws InvalidArgumentException
+     */
     public function sendServerSuspensionEmail(Server $server): void
     {
         $context = $this->buildEmailContext($server);
@@ -65,7 +72,7 @@ class ServerSuspensionEmailService
                     'delete_after_days' => $context->deleteAfterDays,
                 ]
             );
-        } catch (\Exception $exception) {
+        } catch (Exception $exception) {
             $this->logger->error('Failed to send server suspension email', [
                 'exception' => $exception,
                 'user' => $server->getUser(),
@@ -75,6 +82,9 @@ class ServerSuspensionEmailService
         }
     }
 
+    /**
+     * @throws InvalidArgumentException
+     */
     private function buildEmailContext(Server $server): ServerSuspensionContextDTO
     {
         $suspensionDate = new DateTimeImmutable();
@@ -115,6 +125,9 @@ class ServerSuspensionEmailService
         );
     }
 
+    /**
+     * @throws InvalidArgumentException
+     */
     private function getClientPanelUrl(): string
     {
         return $this->pterodactylRedirectService->getBasePanelUrl();

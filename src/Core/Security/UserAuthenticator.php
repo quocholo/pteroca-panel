@@ -2,8 +2,11 @@
 
 namespace App\Core\Security;
 
+use App\Core\Event\User\Authentication\UserLoginAttemptedEvent;
+use App\Core\Event\User\Authentication\UserLoginValidatedEvent;
 use App\Core\Repository\UserRepository;
 use App\Core\Service\Captcha\CaptchaService;
+use App\Core\Service\Event\EventContextService;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -18,6 +21,7 @@ use Symfony\Component\Security\Http\Authenticator\Passport\Credentials\PasswordC
 use Symfony\Component\Security\Http\Authenticator\Passport\Passport;
 use Symfony\Component\Security\Http\SecurityRequestAttributes;
 use Symfony\Component\Security\Http\Util\TargetPathTrait;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
@@ -33,12 +37,21 @@ class UserAuthenticator extends AbstractLoginFormAuthenticator
         private readonly CaptchaService $captchaService,
         private readonly TranslatorInterface   $translator,
         private readonly UserRepository        $userRepository,
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly EventContextService $eventContextService,
     ) {}
 
     public function authenticate(Request $request): Passport
     {
-        $email = $request->request->get('email', '');
+        $formData = $request->request->all();
+        $email = $formData['login_form']['email'] ?? $request->request->get('email', '');
+        $password = $formData['login_form']['password'] ?? $request->request->get('password', '');
+        $csrfToken = $formData['login_form']['_token'] ?? $request->request->get('_csrf_token', '');
         $recaptchaResponse = $request->request->getString('g-recaptcha-response');
+
+        $context = $this->eventContextService->buildMinimalContext($request);
+        $loginAttemptedEvent = new UserLoginAttemptedEvent($email, $context);
+        $this->eventDispatcher->dispatch($loginAttemptedEvent);
 
         if ($this->captchaService->isCaptchaEnabled()
             && !$this->captchaService->validateCaptcha($recaptchaResponse)) {
@@ -55,6 +68,11 @@ class UserAuthenticator extends AbstractLoginFormAuthenticator
             }
         }
 
+        if (!empty($user)) {
+            $loginValidatedEvent = new UserLoginValidatedEvent($email, $user->getId(), $context);
+            $this->eventDispatcher->dispatch($loginValidatedEvent);
+        }
+
         $request->getSession()->set(SecurityRequestAttributes::LAST_USERNAME, $email);
 
         $disableCsrf = isset($_ENV['DISABLE_CSRF']) && $_ENV['DISABLE_CSRF'] === 'true';
@@ -62,12 +80,12 @@ class UserAuthenticator extends AbstractLoginFormAuthenticator
             new RememberMeBadge(),
         ];
         if (!$disableCsrf) {
-            $badges[] = new CsrfTokenBadge('authenticate', $request->request->get('_csrf_token'));
+            $badges[] = new CsrfTokenBadge('authenticate', $csrfToken);
         }
 
         return new Passport(
             new UserBadge($email),
-            new PasswordCredentials($request->request->get('password', '')),
+            new PasswordCredentials($password),
             $badges,
         );
     }

@@ -5,12 +5,15 @@ namespace App\Core\Service\Pterodactyl;
 use App\Core\Contract\ProductInterface;
 use Exception;
 
-class NodeSelectionService
+readonly class NodeSelectionService
 {
     public function __construct(
-        private readonly PterodactylService $pterodactylService
+        private PterodactylApplicationService $pterodactylApplicationService,
     ) {}
 
+    /**
+     * @throws Exception
+     */
     public function getBestAllocationId(ProductInterface $product): int
     {
         $bestNode = null;
@@ -18,7 +21,10 @@ class NodeSelectionService
         $bestNodeFreeDisk = 0;
 
         foreach ($product->getNodes() as $nodeId) {
-            $node = $this->pterodactylService->getApi()->nodes->get($nodeId);
+            $node = $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->nodes()
+                ->getNode($nodeId);
 
             $freeMemory = $node['memory'] - $node['allocated_resources']['memory'];
             $freeDisk = $node['disk'] - $node['allocated_resources']['disk'];
@@ -36,7 +42,12 @@ class NodeSelectionService
             throw new Exception('No suitable node found with enough resources');
         }
 
-        $allocations = $this->pterodactylService->getApi()->node_allocations->all($bestNode['id'])->toArray();
+        $allocations = $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->nodeAllocations()
+            ->all($bestNode['id'])
+            ->toArray();
+
         foreach ($allocations as $allocation) {
             if (!$allocation['assigned']) {
                 return $allocation['id'];

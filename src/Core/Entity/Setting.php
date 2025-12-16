@@ -6,7 +6,7 @@ use App\Core\Repository\SettingRepository;
 use Doctrine\ORM\Mapping as ORM;
 
 #[ORM\Entity(repositoryClass: SettingRepository::class)]
-class Setting
+class Setting extends AbstractEntity
 {
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -27,6 +27,9 @@ class Setting
 
     #[ORM\Column(type: "smallint", options: ["default" => 100])]
     private int $hierarchy = 100;
+
+    #[ORM\Column(type: "boolean", options: ["default" => false])]
+    private bool $nullable = false;
 
     public function getId(): int
     {
@@ -85,6 +88,17 @@ class Setting
     public function setHierarchy(int $hierarchy): self
     {
         $this->hierarchy = $hierarchy;
+        return $this;
+    }
+
+    public function isNullable(): bool
+    {
+        return $this->nullable;
+    }
+
+    public function setNullable(bool $nullable): self
+    {
+        $this->nullable = $nullable;
         return $this;
     }
 

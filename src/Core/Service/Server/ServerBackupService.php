@@ -2,20 +2,43 @@
 
 namespace App\Core\Service\Server;
 
+use App\Core\Contract\Pterodactyl\Client\PterodactylClientAdapterInterface;
 use App\Core\Contract\UserInterface;
 use App\Core\Entity\Server;
 use App\Core\Enum\ServerLogActionEnum;
+use App\Core\Event\Server\Backup\ServerBackupCreatedEvent;
+use App\Core\Event\Server\Backup\ServerBackupCreationFailedEvent;
+use App\Core\Event\Server\Backup\ServerBackupCreationRequestedEvent;
+use App\Core\Event\Server\Backup\ServerBackupDeletedEvent;
+use App\Core\Event\Server\Backup\ServerBackupDeletionRequestedEvent;
+use App\Core\Event\Server\Backup\ServerBackupDownloadInitiatedEvent;
+use App\Core\Event\Server\Backup\ServerBackupDownloadRequestedEvent;
+use App\Core\Event\Server\Backup\ServerBackupRestoreFailedEvent;
+use App\Core\Event\Server\Backup\ServerBackupRestoreInitiatedEvent;
+use App\Core\Event\Server\Backup\ServerBackupRestoreRequestedEvent;
+use App\Core\Event\Server\Backup\ServerBackupRestoredEvent;
+use App\Core\Service\Event\EventContextService;
 use App\Core\Service\Logs\ServerLogService;
-use App\Core\Service\Pterodactyl\PterodactylClientService;
-use Timdesm\PterodactylPhpApi\PterodactylApi;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
+use Exception;
+use InvalidArgumentException;
+use RuntimeException;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
-class ServerBackupService
+readonly class ServerBackupService
 {
     public function __construct(
-        private readonly PterodactylClientService $pterodactylClientService,
-        private readonly ServerLogService $serverLogService,
+        private PterodactylApplicationService $pterodactylApplicationService,
+        private ServerLogService              $serverLogService,
+        private EventDispatcherInterface      $eventDispatcher,
+        private RequestStack                  $requestStack,
+        private EventContextService           $eventContextService,
     ) {}
 
+    /**
+     * @throws Exception
+     */
     public function createBackup(
         Server $server,
         UserInterface $user,
@@ -24,29 +47,69 @@ class ServerBackupService
         bool $isLocked = false,
     ): array
     {
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
         if (empty($backupName)) {
-            throw new \InvalidArgumentException('Backup name is required');
+            throw new InvalidArgumentException('Backup name is required');
         }
 
-        $createdBackup = $this->getPterodactylClientApi($user)
-            ->server_backups
-            ->create($server->getPterodactylServerIdentifier(), [
-                'name' => $backupName,
-                'is_locked' => $isLocked,
-                'ignored' => $ignoredFiles ?? '',
-            ])->toArray();
-
-        $this->serverLogService->logServerAction(
-            $user,
-            $server,
-            ServerLogActionEnum::CREATE_BACKUP,
-            [
-                'backup_id' => $createdBackup['uuid'],
-                'backup_name' => $backupName,
-            ]
+        $requestedEvent = new ServerBackupCreationRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $backupName,
+            $ignoredFiles,
+            $context
         );
+        $this->eventDispatcher->dispatch($requestedEvent);
 
-        return $createdBackup;
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Backup creation was blocked';
+            throw new RuntimeException($reason);
+        }
+
+        try {
+            $createdBackup = $this->getPterodactylClientApi($user)
+                ->backups()
+                ->createBackup($server, $backupName, $ignoredFiles, $isLocked)
+                ->toArray();
+
+            $this->serverLogService->logServerAction(
+                $user,
+                $server,
+                ServerLogActionEnum::CREATE_BACKUP,
+                [
+                    'backup_id' => $createdBackup['uuid'],
+                    'backup_name' => $backupName,
+                ]
+            );
+
+            $createdEvent = new ServerBackupCreatedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $createdBackup['uuid'],
+                $backupName,
+                $ignoredFiles,
+                $context
+            );
+            $this->eventDispatcher->dispatch($createdEvent);
+
+            return $createdBackup;
+        } catch (Exception $exception) {
+            $failedEvent = new ServerBackupCreationFailedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $backupName,
+                $exception->getMessage(),
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
+            throw $exception;
+        }
     }
 
     public function getBackupDownloadUrl(
@@ -55,19 +118,24 @@ class ServerBackupService
         string $backupId,
     ): string
     {
-        $endpointUrl = sprintf(
-            'servers/%s/backups/%s/download',
-            $server->getPterodactylServerIdentifier(), $backupId
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerBackupDownloadRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $backupId,
+            $context
         );
+        $this->eventDispatcher->dispatch($requestedEvent);
 
         $downloadUrl = $this->getPterodactylClientApi($user)
-            ->server_backups
-            ->http
-            ->get($endpointUrl)
-            ->toArray()['url'] ?? null;
+            ->backups()
+            ->getBackupDownloadUrl($server, $backupId)['url'] ?? null;
 
         if (empty($downloadUrl)) {
-            throw new \RuntimeException('Failed to get backup download URL');
+            throw new RuntimeException('Failed to get backup download URL');
         }
 
         $this->serverLogService->logServerAction(
@@ -79,6 +147,16 @@ class ServerBackupService
             ]
         );
 
+        $initiatedEvent = new ServerBackupDownloadInitiatedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $backupId,
+            $downloadUrl,
+            $context
+        );
+        $this->eventDispatcher->dispatch($initiatedEvent);
+
         return $downloadUrl;
     }
 
@@ -88,9 +166,26 @@ class ServerBackupService
         string $backupId,
     ): string
     {
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerBackupDeletionRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $backupId,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Backup deletion was blocked';
+            throw new RuntimeException($reason);
+        }
+
         $deletedBackup = $this->getPterodactylClientApi($user)
-            ->server_backups
-            ->delete($server->getPterodactylServerIdentifier(), $backupId, []);
+            ->backups()
+            ->deleteBackup($server, $backupId);
 
         $this->serverLogService->logServerAction(
             $user,
@@ -101,9 +196,21 @@ class ServerBackupService
             ]
         );
 
+        $deletedEvent = new ServerBackupDeletedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $backupId,
+            $context
+        );
+        $this->eventDispatcher->dispatch($deletedEvent);
+
         return $deletedBackup;
     }
 
+    /**
+     * @throws Exception
+     */
     public function restoreBackup(
         Server $server,
         UserInterface $user,
@@ -111,32 +218,77 @@ class ServerBackupService
         bool $truncate = false,
     ): void
     {
-        $endpointUrl = sprintf(
-            'servers/%s/backups/%s/restore',
-            $server->getPterodactylServerIdentifier(), $backupId
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $requestedEvent = new ServerBackupRestoreRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $backupId,
+            $truncate,
+            $context
         );
+        $this->eventDispatcher->dispatch($requestedEvent);
 
-        $requestData['truncate'] = $truncate;
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Backup restore was blocked';
+            throw new RuntimeException($reason);
+        }
 
-        $this->getPterodactylClientApi($user)
-            ->server_backups
-            ->http
-            ->post($endpointUrl, $requestData);
-
-        $this->serverLogService->logServerAction(
-            $user,
-            $server,
-            ServerLogActionEnum::RESTORE_BACKUP,
-            [
-                'backup_id' => $backupId,
-                'truncate' => $truncate,
-            ]
+        $initiatedEvent = new ServerBackupRestoreInitiatedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $backupId,
+            $truncate,
+            $context
         );
+        $this->eventDispatcher->dispatch($initiatedEvent);
+
+        try {
+            $this->getPterodactylClientApi($user)
+                ->backups()
+                ->restoreBackup($server, $backupId, $truncate);
+
+            $this->serverLogService->logServerAction(
+                $user,
+                $server,
+                ServerLogActionEnum::RESTORE_BACKUP,
+                [
+                    'backup_id' => $backupId,
+                    'truncate' => $truncate,
+                ]
+            );
+
+            $restoredEvent = new ServerBackupRestoredEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $backupId,
+                $truncate,
+                $context
+            );
+            $this->eventDispatcher->dispatch($restoredEvent);
+        } catch (Exception $exception) {
+            $failedEvent = new ServerBackupRestoreFailedEvent(
+                $user->getId(),
+                $server->getId(),
+                $server->getPterodactylServerIdentifier(),
+                $backupId,
+                $truncate,
+                $exception->getMessage(),
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
+            throw $exception;
+        }
     }
 
-    private function getPterodactylClientApi(UserInterface $user): PterodactylApi
+    private function getPterodactylClientApi(UserInterface $user): PterodactylClientAdapterInterface
     {
-        return $this->pterodactylClientService
-            ->getApi($user);
+        return $this->pterodactylApplicationService
+            ->getClientApi($user);
     }
 }

@@ -3,6 +3,7 @@
 namespace App\Core\Service\Server;
 
 use App\Core\Contract\UserInterface;
+use App\Core\DTO\Pterodactyl\Application\PterodactylServer;
 use App\Core\Entity\Product;
 use App\Core\Entity\ProductPrice;
 use App\Core\Entity\Server;
@@ -10,7 +11,17 @@ use App\Core\Entity\ServerProduct;
 use App\Core\Entity\ServerProductPrice;
 use App\Core\Enum\LogActionEnum;
 use App\Core\Enum\ProductPriceTypeEnum;
+use App\Core\Enum\SettingEnum;
 use App\Core\Enum\VoucherTypeEnum;
+use App\Core\Event\Server\ServerPurchaseValidatedEvent;
+use App\Core\Event\Server\ServerAboutToBeCreatedEvent;
+use App\Core\Event\Server\ServerCreatedOnPterodactylEvent;
+use App\Core\Event\Server\ServerEntityCreatedEvent;
+use App\Core\Event\Server\ServerProductCreatedEvent;
+use App\Core\Event\Server\ServerBalanceChargedEvent;
+use App\Core\Event\Server\ServerPurchaseCompletedEvent;
+use App\Core\Exception\Email\ProductPriceNotFoundException;
+use App\Core\Exception\Email\ServerDetailsNotAvailableException;
 use App\Core\Repository\ServerProductPriceRepository;
 use App\Core\Repository\ServerProductRepository;
 use App\Core\Repository\ServerRepository;
@@ -18,17 +29,21 @@ use App\Core\Repository\UserRepository;
 use App\Core\Service\Logs\LogService;
 use App\Core\Service\Mailer\BoughtConfirmationEmailService;
 use App\Core\Service\Product\ProductPriceCalculatorService;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
+use App\Core\Service\SettingService;
 use App\Core\Service\Voucher\VoucherPaymentService;
+use DateTime;
+use Exception;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Messenger\Exception\ExceptionInterface;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
+use Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
-use Timdesm\PterodactylPhpApi\Exceptions\ValidationException;
-use Timdesm\PterodactylPhpApi\Resources\Server as PterodactylServer;
 
 class CreateServerService extends AbstractActionServerService
 {
     public function __construct(
-        private readonly PterodactylService $pterodactylService,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
         private readonly ServerRepository $serverRepository,
         private readonly ServerProductRepository $serverProductRepository,
         private readonly BoughtConfirmationEmailService $boughtConfirmationEmailService,
@@ -36,15 +51,21 @@ class CreateServerService extends AbstractActionServerService
         private readonly ServerProductPriceRepository $serverProductPriceRepository,
         private readonly LogService $logService,
         private readonly VoucherPaymentService $voucherPaymentService,
-        private readonly TranslatorInterface $translator,
+        TranslatorInterface $translator,
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly SettingService $settingService,
         UserRepository $userRepository,
         ProductPriceCalculatorService $productPriceCalculatorService,
         LoggerInterface $logger,
     ) {
-        parent::__construct($userRepository, $pterodactylService, $voucherPaymentService, $productPriceCalculatorService, $translator, $logger);
+        parent::__construct($userRepository, $pterodactylApplicationService, $voucherPaymentService, $productPriceCalculatorService, $translator, $logger);
     }
 
     /**
+     * @throws ExceptionInterface
+     * @throws ProductPriceNotFoundException
+     * @throws ServerDetailsNotAvailableException
+     * @throws Exception
      * @return array{server: Server, emailError: string|null}
      */
     public function createServer(
@@ -66,7 +87,37 @@ class CreateServerService extends AbstractActionServerService
             );
         }
 
+        $validatedEvent = new ServerPurchaseValidatedEvent(
+            $user->getId(),
+            $product->getId(),
+            $eggId,
+            $priceId,
+            $slots
+        );
+        $this->eventDispatcher->dispatch($validatedEvent);
+
+        $aboutToBeCreatedEvent = new ServerAboutToBeCreatedEvent(
+            $user->getId(),
+            $product->getId(),
+            $serverName,
+            $eggId,
+            $slots
+        );
+        $this->eventDispatcher->dispatch($aboutToBeCreatedEvent);
+
+        if ($aboutToBeCreatedEvent->isPropagationStopped()) {
+            throw new Exception($this->translator->trans('pteroca.store.server_creation_blocked'));
+        }
+
         $createdPterodactylServer = $this->createPterodactylServer($product, $eggId, $serverName, $user, $slots);
+
+        $createdOnPterodactylEvent = new ServerCreatedOnPterodactylEvent(
+            $user->getId(),
+            $createdPterodactylServer->get('id'),
+            $createdPterodactylServer->get('identifier'),
+            $product->getId()
+        );
+        $this->eventDispatcher->dispatch($createdOnPterodactylEvent);
 
         $createdEntityServer = $this->createEntityServer(
             $createdPterodactylServer,
@@ -75,12 +126,41 @@ class CreateServerService extends AbstractActionServerService
             $priceId,
             $autoRenewal
         );
+
+        $entityCreatedEvent = new ServerEntityCreatedEvent(
+            $createdEntityServer->getId(),
+            $user->getId(),
+            $createdEntityServer->getPterodactylServerId(),
+            $createdEntityServer->getExpiresAt()
+        );
+        $this->eventDispatcher->dispatch($entityCreatedEvent);
+
         $createdEntityServerProduct = $this->createEntityServerProduct($createdEntityServer, $product);
         $this->createEntitiesServerProductPrice($createdEntityServerProduct, $priceId);
 
-        $this->updateUserBalance($user, $product, $priceId, $voucherCode, $slots);
+        $productCreatedEvent = new ServerProductCreatedEvent(
+            $createdEntityServerProduct->getId(),
+            $createdEntityServer->getId(),
+            $product->getId()
+        );
+        $this->eventDispatcher->dispatch($productCreatedEvent);
 
-        // Try to send confirmation email, but don't fail if email is misconfigured
+        $oldBalance = $user->getBalance();
+        $this->updateUserBalance($user, $product, $priceId, $voucherCode, $slots);
+        $newBalance = $user->getBalance();
+
+        $finalPrice = $oldBalance - $newBalance;
+
+        $balanceChargedEvent = new ServerBalanceChargedEvent(
+            $user->getId(),
+            $oldBalance,
+            $newBalance,
+            $createdEntityServer->getId(),
+            $finalPrice,
+            $this->settingService->getSetting(SettingEnum::CURRENCY_NAME->value)
+        );
+        $this->eventDispatcher->dispatch($balanceChargedEvent);
+
         $emailError = null;
         try {
             $this->boughtConfirmationEmailService->sendBoughtConfirmationEmail(
@@ -90,7 +170,7 @@ class CreateServerService extends AbstractActionServerService
                 $priceId,
                 $this->getPterodactylAccountLogin($user),
             );
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             $emailError = 'pteroca.email.creation_not_sent_misconfigured';
             $this->logger->error('Failed to send purchase confirmation email', [
                 'user_id' => $user->getId(),
@@ -98,6 +178,13 @@ class CreateServerService extends AbstractActionServerService
                 'error' => $e->getMessage(),
             ]);
         }
+        $this->boughtConfirmationEmailService->sendBoughtConfirmationEmail(
+            $user,
+            $createdEntityServer,
+            $product,
+            $priceId,
+            $this->getPterodactylAccountLogin($user),
+        );
 
         $this->logService->logAction(
             $user,
@@ -111,12 +198,24 @@ class CreateServerService extends AbstractActionServerService
             ],
         );
 
+        // 7. Emit ServerPurchaseCompletedEvent (after the entire process)
+        $purchaseCompletedEvent = new ServerPurchaseCompletedEvent(
+            $createdEntityServer->getId(),
+            $user->getId(),
+            $product->getId(),
+            $finalPrice
+        );
+        $this->eventDispatcher->dispatch($purchaseCompletedEvent);
+
         return [
             'server' => $createdEntityServer,
             'emailError' => $emailError,
         ];
     }
 
+    /**
+     * @throws Exception
+     */
     private function createPterodactylServer(
         Product $product,
         int $eggId,
@@ -129,20 +228,26 @@ class CreateServerService extends AbstractActionServerService
             $preparedServerBuild = $this->serverBuildService
                 ->prepareServerBuild($product, $user, $eggId, $serverName, $slots);
 
-            return $this->pterodactylService
-                ->getApi()
-                ->servers
-                ->create($preparedServerBuild);
-        } catch (ValidationException $exception) {
-            $errors = array_map(
-                fn($error) => $error['detail'],
-                $exception->errors()['errors']
+            return $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->servers()
+                ->createServer($preparedServerBuild);
+        } catch (ClientExceptionInterface $exception) {
+            // Handle HTTP 4xx errors (validation, authentication, etc.)
+            $this->logger->error('Pterodactyl API client error: ' . $exception->getMessage());
+            throw new Exception(
+                $this->translator->trans('pteroca.store.server_creation_failed') . ': ' . $exception->getMessage()
             );
-            $errors = implode(', ', $errors);
-            throw new \Exception($errors);
+        } catch (Exception $exception) {
+            // Handle other errors from API adapter
+            $this->logger->error('Failed to create server on Pterodactyl: ' . $exception->getMessage());
+            throw $exception;
         }
     }
 
+    /**
+     * @throws Exception
+     */
     private function createEntityServer(
         PterodactylServer $server,
         UserInterface $user,
@@ -157,7 +262,7 @@ class CreateServerService extends AbstractActionServerService
         )->first() ?: null;
 
         if (empty($selectedPrice)) {
-            throw new \Exception($this->translator->trans('pteroca.store.price_not_found'));
+            throw new Exception($this->translator->trans('pteroca.store.price_not_found'));
         }
 
         $datetimeModifier = sprintf(
@@ -170,7 +275,7 @@ class CreateServerService extends AbstractActionServerService
             ->setPterodactylServerId($server->get('id'))
             ->setPterodactylServerIdentifier($server->get('identifier'))
             ->setUser($user)
-            ->setExpiresAt(new \DateTime($datetimeModifier))
+            ->setExpiresAt(new DateTime($datetimeModifier))
             ->setAutoRenewal($autoRenewalStatus);
 
         $this->serverRepository->save($entityServer);

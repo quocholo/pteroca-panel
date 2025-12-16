@@ -69,14 +69,24 @@ interface ProductInterface
     public function getDynamicPrices(): Collection;
 
     /**
-     * @param iterable<ProductPriceInterface> $prices
+     * @return Collection<int, ProductPriceInterface>
      */
-    public function setStaticPrices(iterable $prices): self;
+    public function getSlotPrices(): Collection;
+
+    /**
+     * @param iterable<ProductPriceInterface> $incomingPrices
+     */
+    public function setStaticPrices(iterable $incomingPrices): self;
 
     /**
      * @param iterable<ProductPriceInterface> $prices
      */
     public function setDynamicPrices(iterable $prices): self;
+
+    /**
+     * @param iterable<ProductPriceInterface> $prices
+     */
+    public function setSlotPrices(iterable $prices): self;
 
     public function addPrice(ProductPriceInterface $price): self;
     public function removePrice(ProductPriceInterface $price): self;

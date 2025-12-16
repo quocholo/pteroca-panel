@@ -4,7 +4,7 @@ namespace App\Core\Trait;
 
 use App\Core\Entity\Server;
 use App\Core\Enum\ServerPermissionEnum;
-use Timdesm\PterodactylPhpApi\Resources\Server as PterodactylServer;
+use Exception;
 
 trait InternalServerApiTrait
 {
@@ -23,14 +23,13 @@ trait InternalServerApiTrait
         }
 
         try {
-            /** @var PterodactylServer $pterodactylServer */
-            $pterodactylServer = $this->pterodactylService
-                ->getApi()
-                ->servers
-                ->get($server->getPterodactylServerId(), [ // TODO optimize
-                    'include' => ['subusers'],
+            $pterodactylServer = $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->servers()
+                ->getServer($server->getPterodactylServerId(), [
+                    'subusers'
                 ]);
-        } catch (\Exception) {
+        } catch (Exception) {
             throw $this->createNotFoundException();
         }
 

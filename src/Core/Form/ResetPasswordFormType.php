@@ -2,10 +2,13 @@
 
 namespace App\Core\Form;
 
-use App\Core\Entity\User;
+use App\Core\Event\Form\FormBuildEvent;
+use App\Core\Service\Event\EventContextService;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\PasswordType;
 use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\OptionsResolver\OptionsResolver;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Symfony\Component\Validator\Constraints\Length;
@@ -17,6 +20,9 @@ class ResetPasswordFormType extends AbstractType
 {
     public function __construct(
         private readonly TranslatorInterface $translator,
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly EventContextService $eventContextService,
+        private readonly RequestStack $requestStack,
     ) {}
 
     public function buildForm(FormBuilderInterface $builder, array $options): void
@@ -46,9 +52,15 @@ class ResetPasswordFormType extends AbstractType
                 ],
                 'attr' => ['autocomplete' => 'new-password'],
             ]);
+
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $this->eventContextService->buildNullableContext($request);
+
+        $formBuildEvent = new FormBuildEvent($builder, 'password_reset', $context);
+        $this->eventDispatcher->dispatch($formBuildEvent);
     }
 
-    public function validatePasswordMatch($object, ExecutionContextInterface $context): void
+    public function validatePasswordMatch(ExecutionContextInterface $context): void
     {
         $form = $context->getRoot();
         $newPassword = $form->get('newPassword')->getData();

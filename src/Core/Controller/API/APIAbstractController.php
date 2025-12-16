@@ -1,14 +1,20 @@
 <?php
 
 namespace App\Core\Controller\API;
-use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 
+use App\Core\Enum\PermissionEnum;
+use App\Core\Trait\GetUserTrait;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 
 abstract class APIAbstractController extends AbstractController
 {
-    public function requireAdminRoleForAPIEndpoint(): void
+    use GetUserTrait;
+
+    protected function requirePermission(string|PermissionEnum $permission): void
     {
-        if (!$this->isGranted('ROLE_ADMIN')) {
+        $permissionCode = $permission instanceof PermissionEnum ? $permission->value : $permission;
+
+        if (!$this->isGranted($permissionCode)) {
             throw $this->createAccessDeniedException();
         }
     }

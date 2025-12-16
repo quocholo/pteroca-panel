@@ -2,18 +2,22 @@
 
 namespace App\Core\Service\System;
 
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use Doctrine\ORM\EntityManagerInterface;
+use Exception;
 
 readonly class SystemInformationService
 {
     public function __construct(
         private EntityManagerInterface $entityManager,
-        private PterodactylService $pterodactylService,
+        private PterodactylApplicationService $pterodactylApplicationService,
     )
     {
     }
 
+    /**
+     * @throws \Doctrine\DBAL\Exception
+     */
     public function getSystemInformation(): array
     {
         return [
@@ -40,11 +44,16 @@ readonly class SystemInformationService
         ];
     }
 
+    /**
+     * @throws \Doctrine\DBAL\Exception
+     */
     private function getDatabaseVersion(): string
     {
         try {
-            return $this->entityManager->getConnection()->getServerVersion();
-        } catch (\Exception $exception) {
+            return $this->entityManager
+                ->getConnection()
+                ->getServerVersion();
+        } catch (Exception) {
             return 'N/A';
         }
     }
@@ -52,9 +61,12 @@ readonly class SystemInformationService
     private function isPterodactylApiOnline(): bool
     {
         try {
-            $this->pterodactylService->getApi();
+            $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->locations()
+                ->all();
             return true;
-        } catch (\Exception $exception) {
+        } catch (Exception) {
             return false;
         }
     }
@@ -62,10 +74,13 @@ readonly class SystemInformationService
     private function getPterocaPluginVersion(): ?string
     {
         try {
-            $data = $this->pterodactylService->getApi()->http->get('pteroca/version');
+            $data = $this->pterodactylApplicationService
+                ->getApplicationApi()
+                ->pteroca()
+                ->getVersion();
             
             return $data['version'] ?? null;
-        } catch (\Exception $exception) {
+        } catch (Exception) {
             return null;
         }
     }

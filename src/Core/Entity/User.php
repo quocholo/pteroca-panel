@@ -3,8 +3,13 @@
 namespace App\Core\Entity;
 
 use App\Core\Contract\UserInterface;
-use App\Core\Enum\UserRoleEnum;
+use App\Core\Enum\PermissionEnum;
+use App\Core\Enum\SystemRoleEnum;
 use App\Core\Repository\UserRepository;
+use DateTime;
+use DateTimeInterface;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
 use Doctrine\ORM\Mapping as ORM;
 use Doctrine\ORM\PersistentCollection;
 use Symfony\Bridge\Doctrine\Validator\Constraints\UniqueEntity;
@@ -15,7 +20,7 @@ use Vich\UploaderBundle\Mapping\Annotation as Vich;
 #[UniqueEntity(fields: ['email'], message: 'pteroca.register.email_already_exists')]
 #[ORM\HasLifecycleCallbacks]
 #[Vich\Uploadable]
-class User implements UserInterface
+class User extends AbstractEntity implements UserInterface
 {
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -44,10 +49,10 @@ class User implements UserInterface
     private string $surname;
 
     #[ORM\Column(type: 'datetime')]
-    private \DateTimeInterface $createdAt;
+    private DateTimeInterface $createdAt;
 
     #[ORM\Column(type: 'datetime', nullable: true)]
-    private ?\DateTimeInterface $updatedAt = null;
+    private ?DateTimeInterface $updatedAt = null;
 
     #[ORM\Column(type: 'boolean')]
     private bool $isVerified = false;
@@ -62,18 +67,27 @@ class User implements UserInterface
     private ?File $avatarFile = null;
 
     #[ORM\Column(type: 'datetime', nullable: true)]
-    private ?\DateTime $deletedAt = null;
+    private ?DateTime $deletedAt = null;
 
     #[ORM\OneToMany(targetEntity: Log::class, mappedBy: 'user', cascade: ['remove'])]
     private PersistentCollection $logs;
 
+    #[ORM\ManyToMany(targetEntity: Role::class, inversedBy: 'users')]
+    #[ORM\JoinTable(name: 'user_role')]
+    private Collection $userRoles;
+
     private ?string $plainPassword = null;
 
     /**
-     * @var string The hashed password
+     * @var ?string The hashed password
      */
     #[ORM\Column]
     private ?string $password = null;
+
+    public function __construct()
+    {
+        $this->userRoles = new ArrayCollection();
+    }
 
     public function getId(): ?int
     {
@@ -126,21 +140,38 @@ class User implements UserInterface
         return (string) $this->email;
     }
 
-    /**
-     * @see UserInterface
-     */
     public function getRoles(): array
     {
         $roles = $this->roles;
-        // guarantee every user at least has ROLE_USER
-        $roles[] = UserRoleEnum::ROLE_USER->name;
+
+        foreach ($this->userRoles as $role) {
+            $roles[] = $role->getName();
+        }
+
+        $roles[] = SystemRoleEnum::ROLE_USER->value;
 
         return array_unique($roles);
     }
 
     public function setRoles(array $roles): static
     {
-        $this->roles = $roles;
+        $this->roles = [];
+
+        $currentRoles = [];
+        foreach ($this->userRoles as $role) {
+            $currentRoles[] = $role;
+        }
+        foreach ($currentRoles as $role) {
+            $this->removeUserRole($role);
+        }
+
+        foreach ($roles as $role) {
+            if ($role instanceof Role) {
+                $this->addUserRole($role);
+            } elseif (is_string($role)) {
+                $this->roles[] = $role;
+            }
+        }
 
         return $this;
     }
@@ -244,7 +275,7 @@ class User implements UserInterface
         if (null !== $avatarFile) {
             // It is required that at least one field changes if you are using doctrine
             // otherwise the event listeners won't be called and the file is lost
-            $this->updatedAt = new \DateTime();
+            $this->updatedAt = new DateTime();
         }
 
         return $this;
@@ -253,10 +284,10 @@ class User implements UserInterface
     #[ORM\PrePersist]
     public function setCreatedAtValue(): void
     {
-        $this->createdAt = new \DateTime();
+        $this->createdAt = new DateTime();
     }
 
-    public function getCreatedAt(): \DateTimeInterface
+    public function getCreatedAt(): DateTimeInterface
     {
         return $this->createdAt;
     }
@@ -264,10 +295,10 @@ class User implements UserInterface
     #[ORM\PreUpdate]
     public function setUpdatedAtValue(): void
     {
-        $this->updatedAt = new \DateTime();
+        $this->updatedAt = new DateTime();
     }
 
-    public function getUpdatedAt(): ?\DateTimeInterface
+    public function getUpdatedAt(): ?DateTimeInterface
     {
         return $this->updatedAt;
     }
@@ -292,12 +323,12 @@ class User implements UserInterface
         $this->plainPassword = null;
     }
 
-    public function getDeletedAt(): ?\DateTime
+    public function getDeletedAt(): ?DateTime
     {
         return $this->deletedAt;
     }
 
-    public function setDeletedAt(?\DateTime $deletedAt): self
+    public function setDeletedAt(?DateTime $deletedAt): self
     {
         $this->deletedAt = $deletedAt;
 
@@ -311,7 +342,7 @@ class User implements UserInterface
 
     public function softDelete(): self
     {
-        $this->deletedAt = new \DateTime();
+        $this->deletedAt = new DateTime();
 
         return $this;
     }
@@ -323,9 +354,50 @@ class User implements UserInterface
         return $this;
     }
 
-    public function isAdmin(): bool
+    /**
+     * @return Collection<int, Role>
+     */
+    public function getUserRoles(): Collection
     {
-        return in_array(UserRoleEnum::ROLE_ADMIN->name, $this->getRoles());
+        return $this->userRoles;
+    }
+
+    public function addUserRole(Role $role): static
+    {
+        if (!$this->userRoles->contains($role)) {
+            $this->userRoles->add($role);
+        }
+
+        return $this;
+    }
+
+    public function removeUserRole(Role $role): static
+    {
+        $this->userRoles->removeElement($role);
+
+        return $this;
+    }
+
+    public function hasUserRole(Role $role): bool
+    {
+        return $this->userRoles->contains($role);
+    }
+
+    /**
+     * Check if user has a specific permission through their roles
+     */
+    public function hasPermission(string|PermissionEnum $permissionCode): bool
+    {
+        $code = $permissionCode instanceof PermissionEnum ? $permissionCode->value : $permissionCode;
+
+        foreach ($this->userRoles as $role) {
+            foreach ($role->getPermissions() as $permission) {
+                if ($permission->getCode() === $code) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public function __toString(): string

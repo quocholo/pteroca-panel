@@ -5,11 +5,11 @@
 {% endblock %}
 
 {% block content %}
-    <div class="container-fluid mt-4">
+    <div class="mt-4">
         <!-- Header Section -->
         <div class="row">
             <div class="col-12">
-                <div class="bg-light rounded-3 p-4 mb-4">
+                <div class="dashboard-header rounded-3 p-4">
                     <div class="d-flex align-items-center">
                         <div class="bg-primary rounded-circle me-3">
                             <i class="fas fa-tachometer-alt p-3 text-white"></i>
@@ -23,58 +23,69 @@
             </div>
         </div>
 
-        <div class="row g-4">
-            <!-- Quick Actions -->
-            <div class="col-lg-8 col-md-6">
-                <div class="card border-0 shadow-sm rounded-3 h-100">
-                    <div class="card-header">
-                        <div class="d-flex align-items-center">
-                            <i class="fas fa-bolt me-2"></i>
-                            <h5 class="mb-1 fw-bold text-white">{{ 'pteroca.dashboard.quick_actions'|trans }}</h5>
-                        </div>
-                    </div>
-                    <div class="card-body p-4">
-                        <div class="row g-3">
-                            <div class="col-md-4">
-                                <a href="{{ path('panel', { routeName: 'store' }) }}" class="btn w-100 h-100 d-flex flex-column align-items-center justify-content-center py-3">
-                                    <i class="fas fa-store fs-3 mb-2"></i>
-                                    <span class="fw-semibold">{{ 'pteroca.dashboard.browse_store'|trans }}</span>
-                                </a>
-                            </div>
-                            <div class="col-md-4">
-                                <a href="{{ path('panel', { routeName: 'servers' }) }}" class="btn w-100 h-100 d-flex flex-column align-items-center justify-content-center py-3">
-                                    <i class="fas fa-server fs-3 mb-2"></i>
-                                    <span class="fw-semibold">{{ 'pteroca.dashboard.my_servers'|trans }}</span>
-                                </a>
-                            </div>
-                            <div class="col-md-4">
-                                <a href="{{ path('panel', { routeName: 'recharge_balance' }) }}" class="btn w-100 h-100 d-flex flex-column align-items-center justify-content-center py-3">
-                                    <i class="fas fa-wallet fs-3 mb-2"></i>
-                                    <span class="fw-semibold">{{ 'pteroca.dashboard.account_recharge'|trans }}</span>
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        {# TOP widgets - Full width section #}
+        {% include '_partials/widget_area.html.twig' with {
+            'position': constant('App\\Core\\Enum\\WidgetPosition::TOP'),
+            'widgetContext': widgetContext,
+            'widgetRegistry': widgetRegistry,
+            'contextData': contextData
+        } %}
 
-            <!-- Balance Card -->
-            <div class="col-lg-4 col-md-6">
-                {% include 'panel/dashboard/components/balance.html.twig' %}
-            </div>
-        </div>
+        {# FULL_WIDTH widgets - Spanning entire row #}
+        {% include '_partials/widget_area.html.twig' with {
+            'position': constant('App\\Core\\Enum\\WidgetPosition::FULL_WIDTH'),
+            'widgetContext': widgetContext,
+            'widgetRegistry': widgetRegistry,
+            'contextData': contextData,
+            'cssClass': 'mt-2'
+        } %}
 
+        {# LEFT + RIGHT widgets - Main content area #}
         <div class="row g-4 mt-2">
-            <!-- Servers Section -->
-            <div class="col-12 col-xl-8">
-                {% include 'panel/dashboard/components/servers.html.twig' %}
-            </div>
-            
-            <!-- Right Column -->
-            <div class="col-12 col-xl-4">
-                {% include 'panel/dashboard/components/motd.html.twig' %}
-                {% include 'panel/dashboard/components/activity.html.twig' %}
-            </div>
+            {# LEFT widgets - Main content (8 columns) #}
+            {% set leftWidgets = widgetRegistry.getWidgetsByPosition(
+                constant('App\\Core\\Enum\\WidgetPosition::LEFT'),
+                widgetContext
+            ) %}
+
+            {% if leftWidgets|length > 0 %}
+                <div class="col-12 col-xl-8">
+                    {% for widget in leftWidgets %}
+                        {% if widget.isVisible(widgetContext, contextData) %}
+                            <div class="mb-4">
+                                {% include widget.getTemplate() with widget.getData(widgetContext, contextData) only %}
+                            </div>
+                        {% endif %}
+                    {% endfor %}
+                </div>
+            {% endif %}
+
+            {# RIGHT widgets - Sidebar (4 columns) #}
+            {% set rightWidgets = widgetRegistry.getWidgetsByPosition(
+                constant('App\\Core\\Enum\\WidgetPosition::RIGHT'),
+                widgetContext
+            ) %}
+
+            {% if rightWidgets|length > 0 %}
+                <div class="col-12 col-xl-4">
+                    {% for widget in rightWidgets %}
+                        {% if widget.isVisible(widgetContext, contextData) %}
+                            <div class="mb-4">
+                                {% include widget.getTemplate() with widget.getData(widgetContext, contextData) only %}
+                            </div>
+                        {% endif %}
+                    {% endfor %}
+                </div>
+            {% endif %}
         </div>
+
+        {# BOTTOM widgets - Full width section at bottom #}
+        {% include '_partials/widget_area.html.twig' with {
+            'position': constant('App\\Core\\Enum\\WidgetPosition::BOTTOM'),
+            'widgetContext': widgetContext,
+            'widgetRegistry': widgetRegistry,
+            'contextData': contextData,
+            'cssClass': 'mt-2'
+        } %}
     </div>
 {% endblock %}

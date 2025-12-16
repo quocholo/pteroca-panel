@@ -72,8 +72,8 @@ services:
         mkdir -p /app/var/log /app/var/cache /app/public/uploads
         chown -R www-data:www-data /app/var /app/public/uploads
         chmod -R 775 /app/var /app/public/uploads
-        echo 'Starting PHP development server...'
-        php -S 0.0.0.0:8000 -t public/
+        echo 'Starting PHP development server with router script...'
+        php -S 0.0.0.0:8000 -t public/ public/router.php
       "
     restart: unless-stopped
     env_file:

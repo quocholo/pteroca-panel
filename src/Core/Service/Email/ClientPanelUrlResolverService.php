@@ -4,10 +4,10 @@ namespace App\Core\Service\Email;
 
 use App\Core\Service\Pterodactyl\PterodactylRedirectService;
 
-class ClientPanelUrlResolverService
+readonly class ClientPanelUrlResolverService
 {
     public function __construct(
-        private readonly PterodactylRedirectService $pterodactylRedirectService,
+        private PterodactylRedirectService $pterodactylRedirectService,
     ) {}
 
     public function resolve(): string

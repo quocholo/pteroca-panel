@@ -5,9 +5,12 @@ namespace App\Core\Service\System\WebConfigurator;
 use App\Core\DTO\Action\Result\ConfiguratorVerificationResult;
 use App\Core\Entity\User;
 use App\Core\Enum\SettingEnum;
-use App\Core\Enum\UserRoleEnum;
+use App\Core\Repository\UserRepository;
 use App\Core\Service\Authorization\RegistrationService;
+use App\Core\Service\Security\RoleManager;
 use App\Core\Service\SettingService;
+use App\Core\Service\Telemetry\TelemetryService;
+use Psr\Cache\InvalidArgumentException;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
 class FinishConfigurationService
@@ -29,6 +32,7 @@ class FinishConfigurationService
         SettingEnum::EMAIL_SMTP_PASSWORD->value => 'email_smtp_password',
         SettingEnum::EMAIL_SMTP_FROM->value => 'email_smtp_from',
         SettingEnum::STRIPE_SECRET_KEY->value => 'stripe_secret_key',
+        SettingEnum::TELEMETRY_CONSENT->value => 'telemetry_consent',
     ];
 
     public function __construct(
@@ -37,6 +41,9 @@ class FinishConfigurationService
         private readonly PterodactylConnectionVerificationService $pterodactylConnectionVerificationService,
         private readonly RegistrationService $registrationService,
         private readonly TranslatorInterface $translator,
+        private readonly RoleManager $roleManager,
+        private readonly UserRepository $userRepository,
+        private readonly TelemetryService $telemetryService,
     ) {}
 
     public function getRequiredSettingsMap(): array
@@ -44,45 +51,58 @@ class FinishConfigurationService
         return self::REQUIRED_SETTINGS_MAP;
     }
 
+    /**
+     * @throws InvalidArgumentException
+     */
     public function finishConfiguration(array $data): ConfiguratorVerificationResult
     {
-        $isEmailConnectionValidated = $this->emailConnectionVerificationService->validateConnection(
-            $data['email_smtp_username'],
-            $data['email_smtp_password'],
-            $data['email_smtp_server'],
-            $data['email_smtp_port'],
-        );
-        if (!$isEmailConnectionValidated->isVerificationSuccessful) {
-            $data = $this->clearEmailSettings($data);
-        }
-
-        if (!empty($data['useExistingPterodactylSettings']) && $data['useExistingPterodactylSettings'] === 'true') {
-            $data['pterodactyl_panel_url'] = $this->settingService->getSetting(SettingEnum::PTERODACTYL_PANEL_URL->value);
-            $data['pterodactyl_panel_api_key'] = $this->settingService->getSetting(SettingEnum::PTERODACTYL_API_KEY->value);
-        }
-
-        $isPterodactylConnectionValid = $this->validatePterodactylConnection($data['pterodactyl_panel_url'], $data['pterodactyl_panel_api_key']);
-        if (!$isPterodactylConnectionValid) {
-            return new ConfiguratorVerificationResult(
-                false,
-                $this->translator->trans('pteroca.first_configuration.messages.pterodactyl_api_error'),
+        try {
+            $isEmailConnectionValidated = $this->emailConnectionVerificationService->validateConnection(
+                $data['email_smtp_username'],
+                $data['email_smtp_password'],
+                $data['email_smtp_server'],
+                $data['email_smtp_port'],
             );
+            if (!$isEmailConnectionValidated->isVerificationSuccessful) {
+                $data = $this->clearEmailSettings($data);
+            }
+
+            if (!empty($data['useExistingPterodactylSettings']) && $data['useExistingPterodactylSettings'] === 'true') {
+                $data['pterodactyl_panel_url'] = $this->settingService->getSetting(SettingEnum::PTERODACTYL_PANEL_URL->value);
+                $data['pterodactyl_panel_api_key'] = $this->settingService->getSetting(SettingEnum::PTERODACTYL_API_KEY->value);
+            }
+
+            $isPterodactylConnectionValid = $this->validatePterodactylConnection($data['pterodactyl_panel_url'], $data['pterodactyl_panel_api_key']);
+            if (!$isPterodactylConnectionValid) {
+                $this->telemetryService->sendInstallErrorEvent('pterodactyl_connection_failed');
+                return new ConfiguratorVerificationResult(
+                    false,
+                    $this->translator->trans('pteroca.first_configuration.messages.pterodactyl_api_error'),
+                );
+            }
+
+            $this->saveConfigurationSettings($data);
+
+            if (!$this->createAdminAccount($data)) {
+                $this->telemetryService->sendInstallErrorEvent('admin_account_creation_failed');
+                return new ConfiguratorVerificationResult(
+                    false,
+                    $this->translator->trans('pteroca.first_configuration.messages.validation_error'),
+                );
+            }
+
+            $this->disableConfigurator();
+
+            return new ConfiguratorVerificationResult(true);
+        } catch (\Throwable $e) {
+            $this->telemetryService->sendInstallErrorEvent('configuration_exception');
+            throw $e;
         }
-
-        $this->saveConfigurationSettings($data);
-
-        if (!$this->createAdminAccount($data)) {
-            return new ConfiguratorVerificationResult(
-                false,
-                $this->translator->trans('pteroca.first_configuration.messages.validation_error'),
-            );
-        }
-
-        $this->disableConfigurator();
-
-        return new ConfiguratorVerificationResult(true);
     }
 
+    /**
+     * @throws InvalidArgumentException
+     */
     private function saveConfigurationSettings(array $data): void
     {
         $settingsMap = array_merge(self::REQUIRED_SETTINGS_MAP, self::OPTIONAL_SETTINGS_MAP);
@@ -105,17 +125,31 @@ class FinishConfigurationService
         $user->setSurname('Admin');
         $user->setEmail($data['admin_email']);
 
+        // Register user without roles (empty array) - we'll assign via RoleManager below
         $registerResult = $this->registrationService->registerUser(
             $user,
             $data['admin_password'],
-            [UserRoleEnum::ROLE_ADMIN->name],
+            [],
             true,
-            false,
         );
 
-        return $registerResult->success;
+        if (!$registerResult->success) {
+            return false;
+        }
+
+        // Assign admin role using RoleManager
+        $adminRole = $this->roleManager->getRoleByName('admin');
+        if ($adminRole && $registerResult->user) {
+            $registerResult->user->addUserRole($adminRole);
+            $this->userRepository->save($registerResult->user);
+        }
+
+        return true;
     }
 
+    /**
+     * @throws InvalidArgumentException
+     */
     private function disableConfigurator(): void
     {
         $this->settingService->saveSetting(SettingEnum::IS_CONFIGURED->value, '1');

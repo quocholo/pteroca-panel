@@ -3,23 +3,30 @@
 namespace App\Core\Form;
 
 use App\Core\Entity\User;
+use App\Core\Event\Form\FormBuildEvent;
+use App\Core\Service\Event\EventContextService;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\CheckboxType;
 use Symfony\Component\Form\Extension\Core\Type\EmailType;
 use Symfony\Component\Form\Extension\Core\Type\PasswordType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\OptionsResolver\OptionsResolver;
 use Symfony\Component\Validator\Constraints\IsTrue;
 use Symfony\Component\Validator\Constraints\Length;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Symfony\Component\Validator\Constraints\Email;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
 class RegistrationFormType extends AbstractType
 {
     public function __construct(
         private readonly TranslatorInterface $translator,
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly EventContextService $eventContextService,
+        private readonly RequestStack $requestStack,
     ) {}
 
     public function buildForm(FormBuilderInterface $builder, array $options): void
@@ -42,6 +49,13 @@ class RegistrationFormType extends AbstractType
             ->add('email', EmailType::class, [
                 'label' => $translations['email_address'],
                 'required' => true,
+                'attr' => [
+                    'placeholder' => 'pteroca.register.email_placeholder',
+                    'autocomplete' => 'email',
+                ],
+                'label_attr' => [
+                    'label_icon' => 'fas fa-envelope',
+                ],
                 'constraints' => [
                     new NotBlank(['message' => $translations['email_required']]),
                     new Length(['max' => 180]),
@@ -49,8 +63,16 @@ class RegistrationFormType extends AbstractType
                 ],
             ])
             ->add('name', TextType::class, [
-                'label' => $translations['email_address'],
+                'label' => $translations['please_enter_name'],
                 'required' => true,
+                'attr' => [
+                    'placeholder' => 'pteroca.register.name_placeholder',
+                    'autocomplete' => 'given-name',
+                    'autofocus' => true,
+                ],
+                'label_attr' => [
+                    'label_icon' => 'fas fa-user',
+                ],
                 'constraints' => [
                     new NotBlank(['message' => $translations['please_enter_name']]),
                     new Length([
@@ -63,6 +85,13 @@ class RegistrationFormType extends AbstractType
             ->add('surname', TextType::class, [
                 'label' => $translations['please_enter_surname'],
                 'required' => true,
+                'attr' => [
+                    'placeholder' => 'pteroca.register.surname_placeholder',
+                    'autocomplete' => 'family-name',
+                ],
+                'label_attr' => [
+                    'label_icon' => 'fas fa-user',
+                ],
                 'constraints' => [
                     new NotBlank(['message' => $translations['please_enter_surname']]),
                     new Length([
@@ -75,7 +104,14 @@ class RegistrationFormType extends AbstractType
             ->add('plainPassword', PasswordType::class, [
                 'label' => $translations['please_enter_password'],
                 'mapped' => false,
-                'attr' => ['autocomplete' => 'new-password'],
+                'attr' => [
+                    'autocomplete' => 'new-password',
+                    'placeholder' => 'pteroca.register.password_placeholder',
+                    'show_toggle_password' => true,
+                ],
+                'label_attr' => [
+                    'label_icon' => 'fas fa-lock',
+                ],
                 'constraints' => [
                     new NotBlank(['message' => $translations['please_enter_password']]),
                     new Length([
@@ -87,6 +123,7 @@ class RegistrationFormType extends AbstractType
             ])
             ->add('agreeTerms', CheckboxType::class, [
                 'label' => $translations['accept_terms'],
+                'label_html' => true,
                 'mapped' => false,
                 'required' => true,
                 'constraints' => [
@@ -95,6 +132,12 @@ class RegistrationFormType extends AbstractType
                     ]),
                 ],
             ]);
+        
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $this->eventContextService->buildNullableContext($request);
+
+        $formBuildEvent = new FormBuildEvent($builder, 'registration', $context);
+        $this->eventDispatcher->dispatch($formBuildEvent);
     }
 
     public function configureOptions(OptionsResolver $resolver): void

@@ -3,13 +3,13 @@
 namespace App\Core\Handler\Installer;
 
 use App\Core\Enum\SettingEnum;
-use App\Core\Enum\UserRoleEnum;
 use App\Core\Repository\SettingRepository;
 use App\Core\Service\SettingService;
 use App\Core\Service\System\EnvironmentConfigurationService;
 use App\Core\Service\System\WebConfigurator\EmailConnectionVerificationService;
 use App\Core\Service\System\WebConfigurator\PterodactylConnectionVerificationService;
 use App\Core\Service\System\WebConfigurator\UserValidationService;
+use Random\RandomException;
 use Symfony\Component\Console\Style\SymfonyStyle;
 
 class SystemSettingConfiguratorHandler
@@ -25,6 +25,9 @@ class SystemSettingConfiguratorHandler
         private readonly UserValidationService $userValidationService,
     ) {}
 
+    /**
+     * @throws RandomException
+     */
     public function configureSystemSettings(SymfonyStyle $io): void
     {
         $isAlreadyConfigured = $this->settingService->getSetting(SettingEnum::IS_CONFIGURED->value);
@@ -35,6 +38,7 @@ class SystemSettingConfiguratorHandler
         if ($io->ask('Do you want to configure system settings? (yes/no)', 'yes') === 'yes') {
             $this->generateAppSecretKeyIfNeeded($io);
             $this->askForSiteSettings($io);
+            $this->askForTelemetryConsent($io);
             $this->askForPterodactylPanelCredentialsSettings($io);
             $this->askForEmailSettings($io);
             $this->askForPaymentSettings($io);
@@ -70,8 +74,8 @@ class SystemSettingConfiguratorHandler
             
             $isAdmin = $io->ask('Is user admin? (yes/no)', 'yes') === 'yes';
 
-            $userRole = $isAdmin ? UserRoleEnum::ROLE_ADMIN : UserRoleEnum::ROLE_USER;
-            exec(sprintf('php bin/console app:create-new-user %s %s %s', $email, $password, $userRole->name));
+            $roleName = $isAdmin ? 'admin' : 'user';
+            exec(sprintf('php bin/console app:create-new-user %s %s %s', $email, $password, $roleName));
         }
     }
 
@@ -228,6 +232,32 @@ class SystemSettingConfiguratorHandler
         }
     }
 
+    private function askForTelemetryConsent(SymfonyStyle $io): void
+    {
+        $io->section('Telemetry settings');
+        $io->text('Help improve PteroCA by sending anonymous usage data.');
+        $io->text('We collect anonymous telemetry to improve PteroCA. Only installation events and errors are tracked.');
+        $io->text('No personal data, API keys, or URLs are collected.');
+
+        $telemetryConsent = $io->ask(
+            'Allow sending anonymous telemetry? (yes/no)',
+            'yes'
+        );
+
+        $consentValue = ($telemetryConsent === 'yes') ? '1' : '0';
+
+        $settings = [
+            SettingEnum::TELEMETRY_CONSENT->value => [
+                'value' => $consentValue,
+            ],
+        ];
+
+        $this->saveSettings($settings);
+    }
+
+    /**
+     * @throws RandomException
+     */
     private function generateAppSecretKeyIfNeeded(SymfonyStyle $io): void
     {
         $appKey = $this->environmentConfigurationHandler->getEnvValue('/^APP_SECRET=(.*)$/m');

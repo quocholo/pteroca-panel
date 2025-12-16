@@ -1,7 +1,7 @@
 {
     "name": "pteroca/panel",
     "description": "PteroCA.com is a free, open-source client area and management panel designed specifically for Pterodactyl server users and hosting providers. The platform simplifies and automates server management with a user-friendly interface and robust billing features.",
-    "version": "0.5.11",
+    "version": "0.6.0",
     "type": "project",
     "license": "MIT",
     "minimum-stability": "stable",
@@ -16,7 +16,11 @@
         "php": ">=8.2",
         "ext-ctype": "*",
         "ext-iconv": "*",
+        "ext-pdo": "*",
+        "ext-zip": "*",
+        "composer/semver": "^3.4",
         "doctrine/doctrine-migrations-bundle": "^3.3",
+        "dragonmantank/cron-expression": "^3.3",
         "easycorp/easyadmin-bundle": "^4.8",
         "firebase/php-jwt": "^6.11",
         "lcobucci/jwt": "^5.3",
@@ -40,7 +44,6 @@
         "symfony/serializer": "^7.0",
         "symfony/ux-twig-component": "^2.22",
         "symfony/yaml": "^7.0",
-        "timdesm/pterodactyl-php-api": "^1.2",
         "vich/uploader-bundle": "^2.4"
     },
     "config": {

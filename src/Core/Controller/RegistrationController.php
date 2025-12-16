@@ -3,9 +3,12 @@
 namespace App\Core\Controller;
 
 use App\Core\Entity\User;
+use App\Core\Enum\ViewNameEnum;
 use App\Core\Contract\UserInterface;
 use App\Core\Form\RegistrationFormType;
+use App\Core\Event\Form\FormSubmitEvent;
 use App\Core\Enum\EmailVerificationValueEnum;
+use Exception;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
@@ -13,12 +16,12 @@ use App\Core\Service\Mailer\EmailVerificationService;
 use Symfony\Contracts\Translation\TranslatorInterface;
 use App\Core\Service\Authorization\RegistrationService;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
-use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\Security\Http\Authenticator\AuthenticatorInterface;
 use Symfony\Component\Security\Http\Authentication\UserAuthenticatorInterface;
 
 class RegistrationController extends AbstractController
 {
+
     public function __construct(
         private readonly RegistrationService $registrationService,
         private readonly TranslatorInterface $translator,
@@ -36,22 +39,43 @@ class RegistrationController extends AbstractController
             return $this->redirectToRoute('panel');
         }
 
+        $registrationErrors = [];
         $user = new User();
         $form = $this->createForm(RegistrationFormType::class, $user);
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
-            $registerActionResult = $this->registrationService
-                ->registerUser($user, $form->get('plainPassword')->getData());
+            $formData = [
+                'email' => $user->getEmail(),
+                'name' => $user->getName(),
+                'surname' => $user->getSurname(),
+                'plainPassword' => $form->get('plainPassword')->getData(),
+            ];
+            
+            foreach ($form->all() as $fieldName => $field) {
+                if ($field->getConfig()->getOption('mapped') === false && $fieldName !== 'plainPassword') {
+                    $formData[$fieldName] = $field->getData();
+                }
+            }
 
-            if (!$registerActionResult->success) {
-                $registrationErrors[] = $registerActionResult->error;
+            $context = $this->buildMinimalEventContext($request);
+            $submitEvent = $this->dispatchEvent(new FormSubmitEvent('registration', $formData, $context));
+            
+            if ($submitEvent->isPropagationStopped()) {
+                $registrationErrors[] = $this->translator->trans('pteroca.register.plugin_validation_failed');
             } else {
-                return $userAuthenticator->authenticateUser(
-                    $registerActionResult->user,
-                    $authenticator,
-                    $request
-                );
+                $registerActionResult = $this->registrationService
+                    ->registerUser($user, $submitEvent->getFormValue('plainPassword'));
+
+                if (!$registerActionResult->success) {
+                    $registrationErrors[] = $registerActionResult->error;
+                } else {
+                    return $userAuthenticator->authenticateUser(
+                        $registerActionResult->user,
+                        $authenticator,
+                        $request
+                    );
+                }
             }
         }
 
@@ -60,10 +84,12 @@ class RegistrationController extends AbstractController
             $registrationErrors = array_map(fn ($error) => $error->getMessage(), iterator_to_array($errors));
         }
 
-        return $this->render('panel/registration/register.html.twig', [
+        $viewData = [
             'registrationForm' => $form->createView(),
             'errors' => $registrationErrors,
-        ]);
+        ];
+
+        return $this->renderWithEvent(ViewNameEnum::REGISTRATION, 'panel/registration/register.html.twig', $viewData, $request);
     }
 
     #[Route('/verify-email', name: 'app_verify_email')]
@@ -78,7 +104,7 @@ class RegistrationController extends AbstractController
         try {
             $this->registrationService->verifyEmail($token);
             $this->addFlash('success', $this->translator->trans('pteroca.register.verification_success'));
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             $this->addFlash('danger', $e->getMessage());
         }
 
@@ -86,8 +112,10 @@ class RegistrationController extends AbstractController
     }
 
     #[Route('/verify-notice', name: 'verify_notice')]
-    public function verifyNotice(): Response
+    public function verifyNotice(Request $request): Response
     {
+        $this->checkPermission();
+
         $user = $this->getUser();
         if ($user instanceof UserInterface && $user->isVerified()) {
             return $this->redirectToRoute('panel');
@@ -98,7 +126,17 @@ class RegistrationController extends AbstractController
             return $this->redirectToRoute('panel');
         }
 
-        return $this->render('panel/registration/verify_notice.html.twig');
+        $viewData = [
+            'user' => $user,
+            'verificationMode' => $verificationMode,
+        ];
+
+        return $this->renderWithEvent(
+            ViewNameEnum::EMAIL_VERIFICATION_NOTICE,
+            'panel/registration/verify_notice.html.twig',
+            $viewData,
+            $request
+        );
     }
 
     #[Route('/resend-verification', name: 'resend_verification', methods: ['POST'])]
@@ -119,10 +157,10 @@ class RegistrationController extends AbstractController
         try {
             $this->emailVerificationService->resendVerificationEmail($user);
             $this->addFlash('success', $this->translator->trans('pteroca.email.verification.resend_success'));
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             $this->addFlash('danger', $e->getMessage());
         }
 
-        return $this->redirectToRoute('verify_notice');
+        return $this->redirectToRoute('panel', ['routeName' => 'verify_notice']);
     }
 }

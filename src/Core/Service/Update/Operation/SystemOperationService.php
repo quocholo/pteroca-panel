@@ -2,7 +2,9 @@
 
 namespace App\Core\Service\Update\Operation;
 
+use RuntimeException;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use function dirname;
 
 class SystemOperationService
 {
@@ -25,7 +27,7 @@ class SystemOperationService
     {
         exec('php bin/console cache:clear', $output, $returnCode);
         if ($returnCode !== 0) {
-            throw new \RuntimeException('Failed to clear cache. Output: ' . implode("\n", $output));
+            throw new RuntimeException('Failed to clear cache. Output: ' . implode("\n", $output));
         }
 
         if ($this->options['verbose'] ?? false) {
@@ -45,8 +47,8 @@ class SystemOperationService
             return;
         }
 
-        $directoryToCheck = \dirname(__DIR__, 5);
-        
+        $directoryToCheck = dirname(__DIR__, 5);
+
         if (!$this->isRunningAsRoot()) {
             if ($this->options['verbose'] ?? false) {
                 $this->io->text('Not running as root - skipping file permissions adjustment.');
@@ -63,7 +65,7 @@ class SystemOperationService
 
         $originalOwner = $this->detectOriginalOwner($directoryToCheck);
         $directoryToCheckEscaped = escapeshellarg($directoryToCheck);
-        
+
         $candidateOwners = [
             'www-data:www-data',
             'nginx:nginx',
@@ -72,7 +74,7 @@ class SystemOperationService
 
         $ownerChanged = false;
         foreach ($candidateOwners as $candidate) {
-            [$user, $group] = explode(':', $candidate);
+            [$user] = explode(':', $candidate);
 
             $exitCode = 0;
             $output = [];
@@ -83,7 +85,7 @@ class SystemOperationService
                 $ownerChanged = true;
                 
                 if ($this->options['verbose'] ?? false) {
-                    $this->io->success("File permissions adjusted to {$candidate}.");
+                    $this->io->success("File permissions adjusted to $candidate.");
                 }
                 break;
             }
@@ -108,7 +110,7 @@ class SystemOperationService
 
         $directoryToCheck = \dirname(__DIR__, 5);
         $ownerFile = $directoryToCheck . '/var/.original_owner';
-        
+
         if (!file_exists($ownerFile)) {
             if ($this->options['verbose'] ?? false) {
                 $this->io->text('No ownership restoration needed.');
@@ -125,7 +127,7 @@ class SystemOperationService
 
         $command = sprintf('chown -R %s %s 2>&1', escapeshellarg($originalOwner), escapeshellarg($directory));
         exec($command, $output, $returnCode);
-        
+
         if ($returnCode !== 0) {
             if ($this->options['verbose'] ?? false) {
                 $this->io->warning("Could not restore original owner. Manual restoration may be needed: chown -R {$originalOwner} {$directory}");
@@ -165,11 +167,11 @@ class SystemOperationService
             if (count($parts) >= 2) {
                 $mountPoint = $parts[1];
                 if ($mountPoint === $realPath || strpos($realPath, $mountPoint . '/') === 0) {
-                    if (in_array($parts[0], ['/dev/sda', '/dev/sdb', '/dev/sdc', '/dev/sdd', '/dev/sde'], true) || 
-                        strpos($parts[0], '/dev/sd') === 0 || 
+                    if (in_array($parts[0], ['/dev/sda', '/dev/sdb', '/dev/sdc', '/dev/sdd', '/dev/sde'], true) ||
+                        strpos($parts[0], '/dev/sd') === 0 ||
                         strpos($parts[2], 'ext4') !== false ||
                         strpos($parts[2], 'ext3') !== false) {
-                        
+
                         if ($this->options['verbose'] ?? false) {
                             $this->io->text("Detected mounted volume: {$parts[0]} on {$mountPoint}");
                         }
@@ -201,7 +203,7 @@ class SystemOperationService
         }
 
         $owner = $ownerInfo['name'] . ':' . $groupInfo['name'];
-        
+
         if ($this->options['verbose'] ?? false) {
             $this->io->text("Detected original owner: {$owner}");
         }
@@ -225,19 +227,19 @@ class SystemOperationService
             'var/locks',
         ];
 
-        $rootPath = \dirname(__DIR__, 5);
+        $rootPath = dirname(__DIR__, 5);
         
         foreach ($directoriesToCheck as $dir) {
             $fullPath = $rootPath . '/' . $dir;
             
             if (!is_dir($fullPath)) {
                 if (!mkdir($fullPath, 0755, true) && !is_dir($fullPath)) {
-                    throw new \RuntimeException("Could not create directory: {$fullPath}");
+                    throw new RuntimeException("Could not create directory: $fullPath");
                 }
             }
 
             if (!is_writable($fullPath)) {
-                throw new \RuntimeException("Directory is not writable: {$fullPath}");
+                throw new RuntimeException("Directory is not writable: $fullPath");
             }
         }
 
@@ -248,12 +250,12 @@ class SystemOperationService
 
     private function checkWritePermissions(): void
     {
-        $directoryToCheck = \dirname(__DIR__, 5);
+        $directoryToCheck = dirname(__DIR__, 5);
         $testFile = $directoryToCheck . DIRECTORY_SEPARATOR . 'permission_test_' . uniqid() . '.tmp';
 
         $fp = @fopen($testFile, 'w');
         if ($fp === false) {
-            throw new \RuntimeException(sprintf(
+            throw new RuntimeException(sprintf(
                 'You do not have write permissions to the directory "%s". Run the command with sudo/as root or adjust permissions.',
                 $directoryToCheck
             ));
@@ -273,14 +275,14 @@ class SystemOperationService
         $missingCommands = [];
 
         foreach ($requiredCommands as $command) {
-            exec("which {$command} 2>/dev/null", $output, $returnCode);
+            exec("which $command 2>/dev/null", $output, $returnCode);
             if ($returnCode !== 0) {
                 $missingCommands[] = $command;
             }
         }
 
         if (!empty($missingCommands)) {
-            throw new \RuntimeException('Missing required commands: ' . implode(', ', $missingCommands));
+            throw new RuntimeException('Missing required commands: ' . implode(', ', $missingCommands));
         }
 
         if ($this->options['verbose'] ?? false) {

@@ -4,21 +4,32 @@ namespace App\Core\Service\Server\ServerConfiguration;
 
 use App\Core\Contract\UserInterface;
 use App\Core\Entity\Server;
-use App\Core\Enum\UserRoleEnum;
-use App\Core\Service\Pterodactyl\PterodactylClientService;
-use App\Core\Service\Pterodactyl\PterodactylService;
+use App\Core\Enum\PermissionEnum;
+use App\Core\Event\Server\Configuration\ServerStartupVariableUpdateRequestedEvent;
+use App\Core\Event\Server\Configuration\ServerStartupVariableUpdatedEvent;
+use App\Core\Service\Event\EventContextService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
+use Exception;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Validator\Constraints as Assert;
 use Symfony\Component\Validator\Validation;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
 class ServerConfigurationVariableService extends AbstractServerConfiguration
 {
     public function __construct(
-        private readonly PterodactylClientService $pterodactylClientService,
-        private readonly PterodactylService $pterodactylService,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
+        private readonly ServerConfigurationStartupService $serverConfigurationStartupService,
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly RequestStack $requestStack,
+        private readonly EventContextService $eventContextService,
     ) {
-        parent::__construct($this->pterodactylService);
+        parent::__construct($this->pterodactylApplicationService);
     }
 
+    /**
+     * @throws Exception
+     */
     public function updateServerVariable(
         Server $server,
         UserInterface $user,
@@ -26,37 +37,82 @@ class ServerConfigurationVariableService extends AbstractServerConfiguration
         string $variableValue,
     ): void
     {
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
         $serverDetails = $this->getServerDetails($server, ['variables']);
         $serverVariable = $this->getServerVariable($serverDetails, $variableKey);
-        $this->validateVariable($server, $serverDetails, $serverVariable, $variableValue, $user);
 
-        $this->pterodactylClientService
-            ->getApi($user)
-            ->servers
-            ->http
-            ->put("servers/{$server->getPterodactylServerIdentifier()}/startup/variable", [], [
-                'key' => $variableKey,
-                'value' => $variableValue,
-            ]);
-    }
+        $oldValue = $serverVariable['server_value'] ?? '';
 
-    private function getServerVariable(array $serverDetails, string $variableKey): array
-    {
-        $serverVariables = $serverDetails['relationships']['variables']->toArray();
-        $foundVariable = current(array_filter($serverVariables, function ($variable) use ($variableKey) {
-            return $variable['attributes']['env_variable'] === $variableKey;
-        }));
+        $requestedEvent = new ServerStartupVariableUpdateRequestedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $variableKey,
+            $variableValue,
+            $context
+        );
+        $this->eventDispatcher->dispatch($requestedEvent);
 
-        if (empty($foundVariable['attributes'])) {
-            throw new \Exception('Variable not found');
+        if ($requestedEvent->isPropagationStopped()) {
+            $reason = $requestedEvent->getRejectionReason() ?? 'Server startup variable update was blocked';
+            throw new Exception($reason);
         }
 
-        return $foundVariable['attributes'];
+        $this->validateVariable($server, $serverDetails, $serverVariable, $variableValue, $user);
+
+        $isReadOnlyVariable = $serverVariable['user_editable'] === false;
+
+        if ($isReadOnlyVariable && $user->hasPermission(PermissionEnum::EDIT_SERVER)) {
+            // Use Application API for read-only variables (admin only)
+            $fullServerDetails = $this->getServerDetails($server, ['egg']);
+            $payload = $this->serverConfigurationStartupService->getEnvironmentVariablePayload(
+                $variableKey,
+                $variableValue,
+                $fullServerDetails
+            );
+            $this->serverConfigurationStartupService->updateServerStartup($server, $payload);
+        } else {
+            // Use Client API for user-editable variables
+            $this->pterodactylApplicationService
+                ->getClientApi($user)
+                ->servers()
+                ->updateServerStartupVariable($server->getPterodactylServerIdentifier(), $variableKey, $variableValue);
+        }
+
+        $updatedEvent = new ServerStartupVariableUpdatedEvent(
+            $user->getId(),
+            $server->getId(),
+            $server->getPterodactylServerIdentifier(),
+            $variableKey,
+            $variableValue,
+            $oldValue,
+            $context
+        );
+        $this->eventDispatcher->dispatch($updatedEvent);
+    }
+
+    /**
+     * @throws Exception
+     */
+    private function getServerVariable(array $serverDetails, string $variableKey): array
+    {
+        $serverVariables = $serverDetails['relationships']['variables'];
+        $foundVariable = current(array_filter($serverVariables, function ($variable) use ($variableKey) {
+            return $variable['env_variable'] === $variableKey;
+        }));
+
+        if (empty($foundVariable)) {
+            throw new Exception('Variable not found');
+        }
+
+        return $foundVariable;
     }
 
     private function isVariableEditableForUser(Server $server, array $serverDetails, array $serverVariable, UserInterface $user): bool
     {
-        if (in_array(UserRoleEnum::ROLE_ADMIN->value, $user->getRoles())) {
+        if ($user->hasPermission(PermissionEnum::EDIT_SERVER)) {
             return true;
         }
 
@@ -80,10 +136,13 @@ class ServerConfigurationVariableService extends AbstractServerConfiguration
         return $variableProductEggConfiguration->user_editable ?? false;
     }
 
+    /**
+     * @throws Exception
+     */
     private function validateVariable(Server $server, array $serverDetails, array $serverVariable, string $variableValue, UserInterface $user): void
     {
         if (!$this->isVariableEditableForUser($server, $serverDetails, $serverVariable, $user)) {
-            throw new \Exception('Variable is not editable for user');
+            throw new Exception('Variable is not editable for user');
         }
 
         $variableValueRules = $serverVariable['rules'];
@@ -91,7 +150,7 @@ class ServerConfigurationVariableService extends AbstractServerConfiguration
         
         if (in_array('boolean', $rules)) {
             if (!in_array($variableValue, ['0', '1', 'true', 'false', ''])) {
-                throw new \Exception('Variable value is invalid');
+                throw new Exception('Variable value is invalid');
             }
             return;
         }
@@ -130,7 +189,7 @@ class ServerConfigurationVariableService extends AbstractServerConfiguration
             $violations = $validator->validate($variableValue, $constraints);
 
             if (count($violations) > 0) {
-                throw new \Exception('Variable value is invalid');
+                throw new Exception('Variable value is invalid');
             }
         }
     }

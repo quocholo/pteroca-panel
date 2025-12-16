@@ -5,12 +5,12 @@ namespace App\Core\Controller\Panel;
 use App\Core\Entity\ServerProduct;
 use App\Core\Enum\CrudTemplateContextEnum;
 use App\Core\Enum\SettingEnum;
-use App\Core\Enum\UserRoleEnum;
 use App\Core\Form\ServerProductPriceDynamicFormType;
 use App\Core\Form\ServerProductPriceFixedFormType;
 use App\Core\Form\ServerProductPriceSlotFormType;
 use App\Core\Repository\ServerProductRepository;
 use App\Core\Service\Crud\PanelCrudService;
+use App\Core\Service\Pterodactyl\PterodactylApplicationService;
 use App\Core\Service\Pterodactyl\PterodactylClientService;
 use App\Core\Service\Pterodactyl\PterodactylRedirectService;
 use App\Core\Service\Pterodactyl\PterodactylService;
@@ -25,6 +25,7 @@ use Doctrine\ORM\EntityManagerInterface;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
+use EasyCorp\Bundle\EasyAdminBundle\Config\KeyValueStore;
 use EasyCorp\Bundle\EasyAdminBundle\Context\AdminContext;
 use EasyCorp\Bundle\EasyAdminBundle\Field\AssociationField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\BooleanField;
@@ -37,8 +38,10 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\IdField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\IntegerField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\NumberField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
+use Exception;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
 class ServerProductCrudController extends AbstractPanelController
@@ -52,17 +55,16 @@ class ServerProductCrudController extends AbstractPanelController
 
     public function __construct(
         PanelCrudService $panelCrudService,
-        private readonly PterodactylService $pterodactylService,
-        private readonly PterodactylClientService $pterodactylClientService,
+        private readonly RequestStack $requestStack,
+        private readonly PterodactylApplicationService $pterodactylApplicationService,
         private readonly UpdateServerService $updateServerService,
         private readonly SettingService $settingService,
         private readonly ServerProductRepository $serverProductRepository,
         private readonly DeleteServerService $deleteServerService,
         private readonly TranslatorInterface $translator,
-        private readonly RequestStack $requestStack,
         private readonly PterodactylRedirectService $pterodactylRedirectService,
     ) {
-        parent::__construct($panelCrudService);
+        parent::__construct($panelCrudService, $requestStack);
     }
 
     public static function getEntityFqcn(): string
@@ -75,27 +77,36 @@ class ServerProductCrudController extends AbstractPanelController
         $nests = $this->getNestsChoices();
         $internalCurrency = $this->settingService
             ->getSetting(SettingEnum::INTERNAL_CURRENCY_NAME->value);
-        $fields = [
+
+        return [
             FormField::addTab($this->translator->trans('pteroca.crud.product.server_details'))
                 ->setIcon('fa fa-info-circle'),
             IdField::new('server.id')
-                ->hideOnForm(),
+                ->hideOnForm()
+                ->setColumns(3),
             IntegerField::new('server.pterodactylServerId', $this->translator->trans('pteroca.crud.server.pterodactyl_server_id'))
-                ->setDisabled(),
+                ->setDisabled()
+                ->setColumns(3),
             TextField::new('server.pterodactylServerIdentifier', $this->translator->trans('pteroca.crud.server.pterodactyl_server_identifier'))
-                ->setDisabled(),
+                ->setDisabled()
+                ->setColumns(3),
             TextField::new('server.user', $this->translator->trans('pteroca.crud.server.user'))
-                ->setDisabled(),
+                ->setDisabled()
+                ->setColumns(3),
             TextField::new('server.name', $this->translator->trans('pteroca.crud.server.name'))
                 ->setDisabled(),
             DateTimeField::new('server.createdAt', $this->translator->trans('pteroca.crud.server.created_at'))
-                ->hideOnForm(),
+                ->setDisabled()
+                ->setColumns(3),
             DateTimeField::new('server.deletedAt', $this->translator->trans('pteroca.crud.server.deleted_at'))
                 ->setDisabled()
-                ->hideOnForm(),
-            DateTimeField::new('server.expiresAt', $this->translator->trans('pteroca.crud.server.expires_at')),
-            BooleanField::new('server.isSuspended', $this->translator->trans('pteroca.crud.server.is_suspended')),
+                ->setColumns(3),
+            DateTimeField::new('server.expiresAt', $this->translator->trans('pteroca.crud.server.expires_at'))
+                ->setColumns(3),
+            BooleanField::new('server.isSuspended', $this->translator->trans('pteroca.crud.server.is_suspended'))
+                ->setColumns(3),
             BooleanField::new('server.autoRenewal', $this->translator->trans('pteroca.crud.server.auto_renewal'))
+                ->setColumns(3)
                 ->hideOnIndex(),
 
             FormField::addTab($this->translator->trans('pteroca.crud.product.build_details'))
@@ -165,9 +176,11 @@ class ServerProductCrudController extends AbstractPanelController
                 ->setRequired(true)
                 ->setFormTypeOption('attr', ['class' => 'nest-selector'])
                 ->setColumns(6),
-            HiddenField::new('eggsConfiguration')->onlyOnForms(),
+            HiddenField::new('eggsConfiguration')
+                ->onlyOnForms(),
             BooleanField::new('allowChangeEgg', $this->translator->trans('pteroca.crud.product.egg_allow_change'))
                 ->setRequired(false)
+                ->setColumns(6)
                 ->hideOnIndex(),
             ChoiceField::new('eggs', $this->translator->trans('pteroca.crud.product.eggs'))
                 ->setHelp($this->translator->trans('pteroca.crud.product.eggs_hint'))
@@ -178,13 +191,11 @@ class ServerProductCrudController extends AbstractPanelController
                 ->setFormTypeOption('attr', ['class' => 'egg-selector'])
                 ->setColumns(12),
         ];
-
-        return $fields;
     }
 
     public function configureActions(Actions $actions): Actions
     {
-        return $actions
+        $actions = $actions
             ->disable(Crud::PAGE_INDEX)
             ->remove(Crud::PAGE_NEW, Action::SAVE_AND_ADD_ANOTHER)
             ->remove(Crud::PAGE_EDIT, Action::SAVE_AND_CONTINUE)
@@ -207,8 +218,9 @@ class ServerProductCrudController extends AbstractPanelController
             ->add(Crud::PAGE_EDIT, $this->getServerAction(Crud::PAGE_EDIT))
             ->add(Crud::PAGE_EDIT, $this->getManageServerAction())
             ->add(Crud::PAGE_DETAIL, $this->getManageServerAction())
-            ->add(Crud::PAGE_EDIT, $this->getShowServerLogsAction())
-            ;
+            ->add(Crud::PAGE_EDIT, $this->getShowServerLogsAction());
+
+        return parent::configureActions($actions);
     }
 
     public function configureCrud(Crud $crud): Crud
@@ -218,24 +230,23 @@ class ServerProductCrudController extends AbstractPanelController
         $crud
             ->setEntityLabelInSingular($this->translator->trans('pteroca.crud.product.server_build'))
             ->setEntityLabelInPlural($this->translator->trans('pteroca.crud.product.server_builds'))
-            ->setEntityPermission(UserRoleEnum::ROLE_ADMIN->name)
             ->setSearchFields(null)
         ;
 
         return parent::configureCrud($crud);
     }
 
-    public function edit(AdminContext $context)
+    public function edit(AdminContext $context): KeyValueStore|RedirectResponse|Response
     {
         try {
             $entityId = $context->getRequest()->get('entityId');
             $serverProduct = $this->serverProductRepository->find($entityId);
-            $pterodactylServerResources = $this->pterodactylClientService
-                ->getApi($serverProduct->getServer()->getUser())
-                ->servers
-                ->resources($serverProduct->getServer()->getPterodactylServerIdentifier());
-            $this->isServerOffline = $pterodactylServerResources->get('current_state') !== 'running';
-        } catch (\Exception $exception) {
+            $pterodactylServerResources = $this->pterodactylApplicationService
+                ->getClientApi($serverProduct->getServer()->getUser())
+                ->servers()
+                ->getServerResources($serverProduct->getServer()->getPterodactylServerIdentifier());
+            $this->isServerOffline = $pterodactylServerResources['current_state'] !== 'running';
+        } catch (Exception) {
             $this->isServerOffline = true;
         }
 

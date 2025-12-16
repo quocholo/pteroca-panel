@@ -15,45 +15,95 @@ use App\Core\Repository\ServerRepository;
 use App\Core\Repository\UserRepository;
 use App\Core\Repository\VoucherRepository;
 use App\Core\Repository\VoucherUsageRepository;
+use App\Core\Event\Voucher\VoucherRedemptionFailedEvent;
+use App\Core\Event\Voucher\VoucherRedemptionRequestedEvent;
+use App\Core\Event\Voucher\VoucherRedeemedEvent;
 use App\Core\Service\Authorization\UserVerificationService;
+use App\Core\Service\Event\EventContextService;
 use App\Core\Service\Logs\LogService;
 use App\Core\Service\SettingService;
+use DateTime;
 use Exception;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
-class VoucherService
+readonly class VoucherService
 {
     public function __construct(
-        private readonly VoucherRepository $voucherRepository,
-        private readonly VoucherUsageRepository $voucherUsageRepository,
-        private readonly ServerRepository $serverRepository,
-        private readonly PaymentRepository $paymentRepository,
-        private readonly SettingService $settingService,
-        private readonly UserRepository $userRepository,
-        private readonly LogService $logService,
-        private readonly UserVerificationService $userVerificationService,
-        private readonly TranslatorInterface $translator,
+        private VoucherRepository        $voucherRepository,
+        private VoucherUsageRepository   $voucherUsageRepository,
+        private ServerRepository         $serverRepository,
+        private PaymentRepository        $paymentRepository,
+        private SettingService           $settingService,
+        private UserRepository           $userRepository,
+        private LogService               $logService,
+        private UserVerificationService  $userVerificationService,
+        private TranslatorInterface      $translator,
+        private EventDispatcherInterface $eventDispatcher,
+        private RequestStack             $requestStack,
+        private EventContextService      $eventContextService,
     ) {}
 
     public function redeemVoucher(string $code, ?float $orderAmount, UserInterface $user): RedeemVoucherActionResult
     {
-        try {
-            $this->userVerificationService->validateUserVerification($user);
-            $voucher = $this->getValidVoucher($code);
-        } catch (Exception $exception) {
-            return RedeemVoucherActionResult::failure($exception->getMessage());
-        }
+        // Build event context
+        $request = $this->requestStack->getCurrentRequest();
+        $context = $request ? $this->eventContextService->buildMinimalContext($request) : [];
+
+        $voucher = null;
 
         try {
+            $this->userVerificationService->validateUserVerification($user);
+
+            // 1. Emit VoucherRedemptionRequestedEvent (pre, stoppable)
+            $requestedEvent = new VoucherRedemptionRequestedEvent(
+                $user->getId(),
+                $code,
+                $orderAmount,
+                $context
+            );
+            $this->eventDispatcher->dispatch($requestedEvent);
+
+            // Check if event was stopped (e.g., by fraud detection plugin)
+            if ($requestedEvent->isPropagationStopped()) {
+                $reason = $requestedEvent->getRejectionReason() ?? $this->translator->trans('pteroca.api.voucher.redemption_blocked');
+                throw new Exception($reason);
+            }
+
             $voucher = $this->getValidVoucher($code);
             $this->validateNewAccountRequirementIfNeeded($voucher, $user);
             $this->validateOneUsePerUserRequirementIfNeeded($voucher, $user);
             $this->validateMinimumTopupAmountRequirementIfNeeded($voucher, $user);
             $this->validateMinimumOrderAmountRequirementIfNeeded($orderAmount, $voucher);
 
+            $balanceAdded = null;
+            $oldBalance = null;
+            $newBalance = null;
+            $voucherUsageId = null;
+
             if ($voucher->getType() === VoucherTypeEnum::BALANCE_TOPUP) {
-                $this->redeemVoucherForUser($voucher, $user);
+                $oldBalance = $user->getBalance();
+                $voucherUsage = $this->redeemVoucherForUser($voucher, $user);
+                $voucherUsageId = $voucherUsage->getId();
+                $newBalance = $user->getBalance();
+                $balanceAdded = $newBalance - $oldBalance;
             }
+
+            // 2. Emit VoucherRedeemedEvent (post-commit)
+            $redeemedEvent = new VoucherRedeemedEvent(
+                $user->getId(),
+                $voucher->getId(),
+                $voucher->getCode(),
+                $voucher->getType(),
+                (float)$voucher->getValue(),
+                $voucherUsageId ?? 0,
+                $balanceAdded,
+                $oldBalance,
+                $newBalance,
+                $context
+            );
+            $this->eventDispatcher->dispatch($redeemedEvent);
 
             $successMessage = $this->translator->trans('pteroca.api.voucher.successfully_applied');
 
@@ -63,14 +113,28 @@ class VoucherService
                 $voucher->getValue(),
             );
         } catch (Exception $exception) {
+            // 3. Emit VoucherRedemptionFailedEvent (error)
+            $failedEvent = new VoucherRedemptionFailedEvent(
+                $user->getId(),
+                $code,
+                $exception->getMessage(),
+                $voucher?->getType(),
+                $voucher ? (float)$voucher->getValue() : null,
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
             return RedeemVoucherActionResult::failure(
                 $exception->getMessage(),
-                $voucher->getType()->value,
-                $voucher->getValue(),
+                $voucher?->getType()->value,
+                $voucher?->getValue(),
             );
         }
     }
 
+    /**
+     * @throws Exception
+     */
     public function getValidVoucher(string $code): Voucher
     {
         $voucher = $this->voucherRepository->getVoucherByCode($code);
@@ -79,7 +143,7 @@ class VoucherService
             throw new Exception($this->translator->trans('pteroca.api.voucher.not_found'));
         }
 
-        if (!empty($voucher->getExpirationDate()) && $voucher->getExpirationDate() < new \DateTime()) {
+        if (!empty($voucher->getExpirationDate()) && $voucher->getExpirationDate() < new DateTime()) {
             throw new Exception($this->translator->trans('pteroca.api.voucher.expired'));
         }
 
@@ -90,6 +154,9 @@ class VoucherService
         return $voucher;
     }
 
+    /**
+     * @throws Exception
+     */
     private function validateNewAccountRequirementIfNeeded(Voucher $voucher, UserInterface $user): void
     {
         if (false === $voucher->isNewAccountsOnly()) {
@@ -105,6 +172,9 @@ class VoucherService
         }
     }
 
+    /**
+     * @throws Exception
+     */
     private function validateOneUsePerUserRequirementIfNeeded(Voucher $voucher, UserInterface $user): void
     {
         if (false === $voucher->isOneUsePerUser()) {
@@ -116,6 +186,9 @@ class VoucherService
         }
     }
 
+    /**
+     * @throws Exception
+     */
     private function validateMinimumTopupAmountRequirementIfNeeded(Voucher $voucher, UserInterface $user): void
     {
         if (empty($voucher->getMinimumTopupAmount())) {
@@ -137,6 +210,9 @@ class VoucherService
         }
     }
 
+    /**
+     * @throws Exception
+     */
     private function validateMinimumOrderAmountRequirementIfNeeded(?float $orderAmount, Voucher $voucher): void
     {
         if (
@@ -156,7 +232,7 @@ class VoucherService
         }
     }
 
-    public function redeemVoucherForUser(Voucher $voucher, UserInterface $user): void
+    public function redeemVoucherForUser(Voucher $voucher, UserInterface $user): VoucherUsage
     {
         $voucherUsage = (new VoucherUsage())
             ->setUser($user)
@@ -174,6 +250,8 @@ class VoucherService
 
         $voucher->setUsedCount($voucher->getUsedCount() + 1);
         $this->voucherRepository->save($voucher);
+
+        return $voucherUsage;
     }
 
     private function addVoucherBalanceTopup(Voucher $voucher, UserInterface $user): void

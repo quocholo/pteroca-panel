@@ -2,29 +2,33 @@
 
 namespace App\Core\Service\Authorization;
 
-use App\Core\Contract\UserInterface;
-use App\Core\DTO\Action\Result\RegisterUserActionResult;
-use App\Core\DTO\Email\RegistrationEmailContextDTO;
-use App\Core\Enum\EmailTypeEnum;
-use App\Core\Enum\EmailVerificationValueEnum;
-use App\Core\Enum\LogActionEnum;
-use App\Core\Enum\SettingEnum;
-use App\Core\Enum\UserRoleEnum;
-use App\Core\Message\SendEmailMessage;
-use App\Core\Repository\UserRepository;
-use App\Core\Service\Email\EmailNotificationService;
-use App\Core\Service\Logs\LogService;
-use App\Core\Service\Mailer\EmailVerificationService;
-use App\Core\Service\SettingService;
-use App\Core\Service\User\UserService;
-use Lcobucci\JWT\Configuration;
-use Lcobucci\JWT\Signer\Hmac\Sha256;
-use Lcobucci\JWT\Signer\Key\InMemory;
+use DateTimeInterface;
+use Exception;
 use Lcobucci\JWT\Token\Plain;
+use App\Core\Enum\SettingEnum;
+use App\Core\Enum\SystemRoleEnum;
+use Lcobucci\JWT\Configuration;
+use App\Core\Enum\LogActionEnum;
+use App\Core\Contract\UserInterface;
+use App\Core\Service\SettingService;
+use Lcobucci\JWT\Signer\Hmac\Sha256;
+use App\Core\Service\Logs\LogService;
+use Lcobucci\JWT\Signer\Key\InMemory;
+use App\Core\Service\User\UserService;
+use App\Core\Repository\UserRepository;
+use App\Core\Repository\RoleRepository;
+use App\Core\Event\User\Registration\UserRegisteredEvent;
+use App\Core\Enum\EmailVerificationValueEnum;
+use App\Core\Event\User\Registration\UserEmailVerifiedEvent;
 use Lcobucci\JWT\Validation\Constraint\IssuedBy;
-use Psr\Log\LoggerInterface;
-use Symfony\Component\Messenger\MessageBusInterface;
+use RuntimeException;
+use Symfony\Component\HttpFoundation\RequestStack;
+use App\Core\Event\User\Registration\UserRegistrationFailedEvent;
 use Symfony\Contracts\Translation\TranslatorInterface;
+use App\Core\Event\User\Registration\UserRegistrationRequestedEvent;
+use App\Core\Event\User\Registration\UserRegistrationValidatedEvent;
+use App\Core\DTO\Action\Result\RegisterUserActionResult;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
 class RegistrationService
 {
@@ -34,14 +38,13 @@ class RegistrationService
 
     public function __construct(
         private readonly UserRepository $userRepository,
+        private readonly RoleRepository $roleRepository,
         private readonly TranslatorInterface $translator,
         private readonly LogService $logService,
         private readonly SettingService $settingService,
         private readonly UserService $userService,
-        private readonly MessageBusInterface $messageBus,
-        private readonly LoggerInterface $logger,
-        private readonly EmailVerificationService $emailVerificationService,
-        private readonly EmailNotificationService $emailNotificationService,
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly RequestStack $requestStack,
     ) {
         $this->jwtConfiguration = Configuration::forSymmetricSigner(
             new Sha256(),
@@ -52,23 +55,71 @@ class RegistrationService
     public function registerUser(
         UserInterface $user,
         string $plainPassword,
-        array $roles = [UserRoleEnum::ROLE_USER->name],
-        bool $isVerified = false,
-        bool $sendEmail = true
+        array $roles = [SystemRoleEnum::ROLE_USER->value],
+        bool $isVerified = false
     ): RegisterUserActionResult
     {
+        $request = $this->requestStack->getCurrentRequest();
+        $context = [
+            'ip' => $request?->getClientIp(),
+            'userAgent' => $request?->headers->get('User-Agent'),
+            'locale' => $request?->getLocale(),
+            'source' => 'web',
+        ];
+
+        $requestedEvent = new UserRegistrationRequestedEvent($user->getEmail(), $context);
+        $this->eventDispatcher->dispatch($requestedEvent);
+
+        if ($requestedEvent->isRejected()) {
+            return new RegisterUserActionResult(
+                success: false,
+                error: $requestedEvent->getRejectionReason(),
+            );
+        }
+
         $existingDeletedUser = $this->userRepository->findDeletedByEmail($user->getEmail());
         
         if ($existingDeletedUser) {
-            return $this->reactivateUser($existingDeletedUser, $plainPassword, $roles, $isVerified, $sendEmail);
+            return $this->reactivateUser($existingDeletedUser, $plainPassword, $roles, $isVerified);
+        }
+
+        $validatedEvent = new UserRegistrationValidatedEvent(
+            $user->getEmail(),
+            strtolower($user->getEmail()),
+            $roles,
+            $context
+        );
+        $this->eventDispatcher->dispatch($validatedEvent);
+
+        if ($validatedEvent->isRejected()) {
+            return new RegisterUserActionResult(
+                success: false,
+                error: $validatedEvent->getRejectionReason(),
+            );
         }
 
         $user->setIsVerified($isVerified);
-        $user->setRoles($roles);
+
+        $rolesToSet = $validatedEvent->getRoles();
+        $userRole = $this->roleRepository->findByName(SystemRoleEnum::ROLE_USER->value);
+
+        if ($userRole) {
+            $rolesToSet[] = $userRole;
+        }
+        
+        $user->setRoles($rolesToSet);
 
         try {
             $this->userService->createUserWithPterodactylAccount($user, $plainPassword);
-        } catch (\Exception $exception) {
+        } catch (Exception $exception) {
+            $failedEvent = new UserRegistrationFailedEvent(
+                $user->getEmail(),
+                $exception->getMessage(),
+                'user_creation',
+                $context
+            );
+            $this->eventDispatcher->dispatch($failedEvent);
+
             return new RegisterUserActionResult(
                 success: false,
                 error: $exception->getMessage(),
@@ -76,11 +127,8 @@ class RegistrationService
         }
 
         $this->userRepository->save($user);
-        $this->logService->logAction($user, LogActionEnum::USER_REGISTERED);
 
-        if ($sendEmail) {
-            $this->sendRegistrationEmail($user);
-        }
+        $this->logService->logAction($user, LogActionEnum::USER_REGISTERED);
 
         return new RegisterUserActionResult(
             success: true,
@@ -92,32 +140,60 @@ class RegistrationService
         UserInterface $deletedUser,
         string $plainPassword,
         array $roles,
-        bool $isVerified,
-        bool $sendEmail
+        bool $isVerified
     ): RegisterUserActionResult
     {
         try {
             $deletedUser->restore();
             $deletedUser->setIsVerified($isVerified);
-            $deletedUser->setRoles($roles);
-            
+
+            $rolesToSet = $roles;
+            $userRole = $this->roleRepository->findByName(SystemRoleEnum::ROLE_USER->value);
+
+            if ($userRole) {
+                $rolesToSet[] = $userRole;
+            }
+
+            $deletedUser->setRoles($rolesToSet);
+
+            // NOTE: For reactivation, UserEventSubscriber does NOT emit events automatically,
+            // because this is an UPDATE, not INSERT (prePersist/postPersist are not triggered)
+            // IMPORTANT: Save user BEFORE calling Pterodactyl services to persist role changes
+            $this->userRepository->save($deletedUser);
+
             if (!empty($plainPassword)) {
                 $deletedUser->setPlainPassword($plainPassword);
-                $this->userService->updateUserInPterodactyl($deletedUser, $plainPassword);
-            }
 
-            $this->userRepository->save($deletedUser);
+                if ($deletedUser->getPterodactylUserId()) {
+                    $this->userService->updateUserInPterodactyl($deletedUser, $plainPassword);
+                } else {
+                    $this->userService->createUserWithPterodactylAccount($deletedUser, $plainPassword);
+                }
+
+                $this->userRepository->save($deletedUser);
+            }
             $this->logService->logAction($deletedUser, LogActionEnum::USER_REGISTERED);
 
-            if ($sendEmail) {
-                $this->sendRegistrationEmail($deletedUser);
-            }
+            // Manually emit UserRegisteredEvent for reactivated user
+            $request = $this->requestStack->getCurrentRequest();
+            $registeredEvent = new UserRegisteredEvent(
+                $deletedUser->getId(),
+                $deletedUser->getEmail(),
+                $deletedUser->isVerified(),
+                [
+                    'ip' => $request?->getClientIp(),
+                    'userAgent' => $request?->headers->get('User-Agent'),
+                    'locale' => $request?->getLocale(),
+                    'source' => 'reactivation',
+                ]
+            );
+            $this->eventDispatcher->dispatch($registeredEvent);
 
             return new RegisterUserActionResult(
                 success: true,
                 user: $deletedUser,
             );
-        } catch (\Exception $exception) {
+        } catch (Exception $exception) {
             return new RegisterUserActionResult(
                 success: false,
                 error: $exception->getMessage(),
@@ -129,8 +205,8 @@ class RegistrationService
     {
         try {
             $token = $this->jwtConfiguration->parser()->parse($token);
-        } catch (\Exception) {
-            throw new \RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
+        } catch (Exception) {
+            throw new RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
         }
 
         assert($token instanceof Plain);
@@ -139,14 +215,14 @@ class RegistrationService
         ];
 
         if (!$this->jwtConfiguration->validator()->validate($token, ...$constraints)) {
-            throw new \RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
+            throw new RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
         }
 
         if ($token->claims()->has('exp')) {
             $expiry = $token->claims()->get('exp');
-            $expiryTimestamp = $expiry instanceof \DateTimeInterface ? $expiry->getTimestamp() : (int) $expiry;
+            $expiryTimestamp = $expiry instanceof DateTimeInterface ? $expiry->getTimestamp() : (int) $expiry;
             if ($expiryTimestamp < time()) {
-                throw new \RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
+                throw new RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
             }
         }
 
@@ -155,86 +231,29 @@ class RegistrationService
             $token->payload(),
             $this->jwtConfiguration->signingKey()
         )) {
-            throw new \RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
+            throw new RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
         }
 
         $userId = $token->claims()->get('uid');
         $user = $this->userRepository->find($userId);
         if (empty($user) || $user->isVerified()) {
-            throw new \RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
+            throw new RuntimeException($this->translator->trans('pteroca.register.verification_token_invalid'));
         }
 
         $user->setIsVerified(true);
         $this->userRepository->save($user);
         $this->logService->logAction($user, LogActionEnum::USER_VERIFY_EMAIL);
-    }
 
-    private function sendRegistrationEmail(UserInterface $user): void
-    {
-        try {
-            $context = $this->buildRegistrationEmailContext($user);
-            
-            $emailMessage = new SendEmailMessage(
-                $user->getEmail(),
-                $this->translator->trans('pteroca.email.registration.subject'),
-                'email/registration.html.twig',
-                [
-                    'user' => $context->user,
-                    'siteName' => $context->siteName,
-                    'siteUrl' => $context->siteUrl,
-                    'verificationUrl' => $context->verificationUrl,
-                ]
-            );
-            
-            $this->messageBus->dispatch($emailMessage);
-            
-            $this->emailNotificationService->logEmailSent(
-                $user,
-                EmailTypeEnum::REGISTRATION,
-                null,
-                $this->translator->trans('pteroca.email.registration.subject')
-            );
-            
-            if ($context->verificationUrl !== null) {
-                $this->emailNotificationService->logEmailSent(
-                    $user,
-                    EmailTypeEnum::EMAIL_VERIFICATION,
-                    null,
-                    $this->translator->trans('pteroca.email.verification.subject', ['%siteName%' => $context->siteName])
-                );
-            }
-        } catch (\Exception $exception) {
-            $this->logger->error('Failed to send registration email', [
-                'exception' => $exception,
-                'user' => $user,
-            ]);
-        }
-    }
-
-    private function buildRegistrationEmailContext(UserInterface $user): RegistrationEmailContextDTO
-    {
-        $verificationMode = $this->settingService->getSetting(SettingEnum::REQUIRE_EMAIL_VERIFICATION->value);
-        $siteName = $this->settingService->getSetting(SettingEnum::SITE_TITLE->value);
-        $siteUrl = $this->settingService->getSetting(SettingEnum::SITE_URL->value);
-        
-        $verificationUrl = null;
-        if ($verificationMode !== EmailVerificationValueEnum::DISABLED->value) {
-            $verificationToken = $this->emailVerificationService->createVerificationToken($user);
-            $verificationUrl = sprintf('%s/verify-email?token=%s', $siteUrl, urlencode($verificationToken));
-        }
-        
-        return new RegistrationEmailContextDTO(
-            user: $user,
-            siteName: $siteName,
-            siteUrl: $siteUrl,
-            verificationUrl: $verificationUrl,
+        $request = $this->requestStack->getCurrentRequest();
+        $verifiedEvent = new UserEmailVerifiedEvent(
+            $user->getId(),
+            $user->getEmail(),
+            [
+                'ip' => $request?->getClientIp(),
+                'userAgent' => $request?->headers->get('User-Agent'),
+            ]
         );
-    }
-
-
-    public function userExists(string $email): bool
-    {
-        return !empty($this->userRepository->findOneBy(['email' => $email]));
+        $this->eventDispatcher->dispatch($verifiedEvent);
     }
 
     public function getEmailVerificationMode(): string

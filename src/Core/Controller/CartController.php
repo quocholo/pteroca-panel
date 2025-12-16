@@ -2,29 +2,44 @@
 
 namespace App\Core\Controller;
 
-use App\Core\Attribute\RequiresVerifiedEmail;
-use App\Core\Entity\Product;
-use App\Core\Entity\Server;
-use App\Core\Enum\SettingEnum;
-use App\Core\Enum\UserRoleEnum;
-use App\Core\Repository\ServerRepository;
-use App\Core\Repository\ServerSubuserRepository;
-use App\Core\Repository\UserRepository;
-use App\Core\Service\Payment\PaymentService;
-use App\Core\Service\PurchaseTokenService;
-use App\Core\Service\Server\CreateServerService;
-use App\Core\Service\Server\RenewServerService;
-use App\Core\Service\Server\ServerSlotPricingService;
-use App\Core\Service\SettingService;
-use App\Core\Service\StoreService;
-use Doctrine\ORM\EntityManagerInterface;
 use Exception;
+use App\Core\Entity\Server;
+use App\Core\Entity\Product;
+use App\Core\Enum\SettingEnum;
+use App\Core\Enum\ViewNameEnum;
+use App\Core\Enum\PermissionEnum;
+use App\Core\Service\StoreService;
+use App\Core\Service\SettingService;
+use App\Core\Form\Cart\ServerOrderType;
+use App\Core\Form\Cart\ServerRenewType;
+use App\Core\Repository\UserRepository;
+use App\Core\Form\Cart\TopUpBalanceType;
+use Doctrine\ORM\EntityManagerInterface;
+use App\Core\Repository\ServerRepository;
+use App\Core\Service\PurchaseTokenService;
+use App\Core\Service\Payment\PaymentService;
+use App\Core\Attribute\RequiresVerifiedEmail;
 use Symfony\Component\HttpFoundation\Request;
+use App\Core\Event\Cart\CartBuyRequestedEvent;
 use Symfony\Component\HttpFoundation\Response;
+use App\Core\Service\Server\RenewServerService;
 use Symfony\Component\Routing\Annotation\Route;
-use Symfony\Component\Security\Csrf\CsrfToken;
-use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
+use App\Core\Repository\ServerSubuserRepository;
+use App\Core\Service\Server\CreateServerService;
+use App\Core\Event\Cart\CartPaymentRedirectEvent;
+use App\Core\Event\Cart\CartRenewDataLoadedEvent;
+use App\Core\Event\Cart\CartTopUpDataLoadedEvent;
+use App\Core\Event\Cart\CartRenewBuyRequestedEvent;
+use App\Core\Event\Cart\CartRenewPageAccessedEvent;
+use App\Core\Event\Cart\CartTopUpPageAccessedEvent;
+use App\Core\Service\Payment\PaymentGatewayManager;
+use App\Core\Event\Cart\CartConfigureDataLoadedEvent;
+use App\Core\Service\Server\ServerSlotPricingService;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
+use App\Core\Event\Cart\CartConfigurePageAccessedEvent;
+use App\Core\Event\Payment\PaymentGatewaysCollectedEvent;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class CartController extends AbstractController
 {
@@ -35,7 +50,6 @@ class CartController extends AbstractController
         private readonly TranslatorInterface $translator,
         private readonly ServerSlotPricingService $serverSlotPricingService,
         private readonly PurchaseTokenService $purchaseTokenService,
-        private readonly CsrfTokenManagerInterface $csrfTokenManager,
         private readonly UserRepository $userRepository,
         private readonly EntityManagerInterface $entityManager,
     ) {}
@@ -46,72 +60,190 @@ class CartController extends AbstractController
         Request $request,
         SettingService $settingService,
         PaymentService $paymentService,
+        PaymentGatewayManager $gatewayManager,
     ): Response
     {
-        $requestPayload = $request->isMethod('POST')
-            ? $request->request->all()
-            : $request->query->all();
+        $this->denyAccessUnlessGranted(PermissionEnum::ACCESS_WALLET->value);
+
         $currency = $settingService->getSetting(SettingEnum::CURRENCY_NAME->value);
 
-        if (
-            empty($requestPayload['currency'])
-            || empty($requestPayload['amount'])
-            || strtolower($currency) !== strtolower($requestPayload['currency'])
-        ) {
-            return $this->redirectToRoute('panel', [
-                'routeName' => 'recharge_balance',
-            ]);
+        $context = $this->buildMinimalEventContext($request);
+        $gatewaysEvent = new PaymentGatewaysCollectedEvent($gatewayManager, $context);
+        $this->dispatchEvent($gatewaysEvent);
+
+        $availableGateways = $gatewayManager->getProvidersForCurrency($currency);
+
+        $gatewayChoices = [];
+        foreach ($availableGateways as $gateway) {
+            $gatewayChoices[$gateway->getDisplayName()] = $gateway->getIdentifier();
         }
 
-        $amount = (float) $requestPayload['amount'];
-        if ($amount <= 0) {
-            $this->addFlash('danger', $this->translator->trans('pteroca.recharge.amount_must_be_positive'));
-            return $this->redirectToRoute('panel', [
-                'routeName' => 'recharge_balance',
-            ]);
+        $initialData = [];
+        if ($request->query->has('amount')) {
+            $initialData['amount'] = (float) $request->query->get('amount');
+        }
+        if ($request->query->has('currency')) {
+            $initialData['currency'] = $request->query->get('currency');
         }
 
-        if ($request->isMethod('POST')) {
+        $form = $this->createForm(TopUpBalanceType::class, $initialData, [
+            'currency' => $currency,
+            'payment_gateways' => $gatewayChoices,
+        ]);
+
+        $form->handleRequest($request);
+
+        $amount = $form->has('amount') && $form->get('amount')->getData()
+            ? (float) $form->get('amount')->getData()
+            : (float) $request->query->get('amount', 0);
+
+        $this->dispatchDataEvent(
+            CartTopUpPageAccessedEvent::class,
+            $request,
+            [$amount, $currency]
+        );
+
+        if ($form->isSubmitted() && $form->isValid()) {
             try {
+                $formData = $form->getData();
+                $gateway = $formData['gateway'];
+
+                $paymentProvider = $gatewayManager->getProvider($gateway);
+                if ($paymentProvider === null) {
+                    throw new Exception($this->translator->trans('pteroca.payment.gateway_not_found'));
+                }
+
+                $baseSuccessUrl = $this->generateUrl(
+                    $paymentProvider->getSuccessCallbackRoute(),
+                    ['provider' => $gateway],
+                    UrlGeneratorInterface::ABSOLUTE_URL
+                );
+
+                $baseCancelUrl = $this->generateUrl(
+                    $paymentProvider->getCancelCallbackRoute(),
+                    ['provider' => $gateway],
+                    UrlGeneratorInterface::ABSOLUTE_URL
+                );
+
+                $successUrl = $paymentProvider->buildSuccessUrl($baseSuccessUrl);
+                $cancelUrl = $paymentProvider->buildCancelUrl($baseCancelUrl);
+
                 $paymentUrl = $paymentService->createPayment(
                     $this->getUser(),
-                    $requestPayload['amount'],
+                    $formData['amount'],
                     $currency,
-                    $requestPayload['voucher'] ?? '',
-                    $this->generateUrl('stripe_success', [], 0) . '?session_id={CHECKOUT_SESSION_ID}',
-                    $this->generateUrl('stripe_cancel', [], 0)
+                    $formData['voucher'] ?? '',
+                    $successUrl,
+                    $cancelUrl,
+                    $gateway
+                );
+
+                $this->dispatchDataEvent(
+                    CartPaymentRedirectEvent::class,
+                    $request,
+                    [$formData['amount'], $currency, $paymentUrl]
                 );
 
                 return $this->redirect($paymentUrl);
-            } catch (\Exception $exception) {
+            } catch (Exception $exception) {
                 $this->addFlash('danger', $exception->getMessage());
             }
         }
 
-        return $this->render('panel/cart/topup.html.twig', [
-            'request' => $requestPayload,
-        ]);
+        $this->dispatchDataEvent(
+            CartTopUpDataLoadedEvent::class,
+            $request,
+            [$amount, $currency]
+        );
+
+        $viewData = [
+            'form' => $form,
+            'availableGateways' => $availableGateways,
+            'currency' => $currency,
+            'request' => ['amount' => $amount, 'currency' => $currency], // For backward compatibility with template
+        ];
+
+        return $this->renderWithEvent(ViewNameEnum::CART_TOPUP, 'panel/cart/topup.html.twig', $viewData, $request);
     }
 
     #[Route('/cart/configure', name: 'cart_configure')]
     public function configure(Request $request): Response
     {
+        $this->denyAccessUnlessGranted(PermissionEnum::ACCESS_SHOP->value);
+
         $product = $this->getProductByRequest($request);
-        $preparedEggs = $this->storeService->getProductEggs($product);
-        $requestParams = $request->query->all();
-        
+
+        $this->dispatchDataEvent(
+            CartConfigurePageAccessedEvent::class,
+            $request,
+            [$product->getId(), $product->getName()]
+        );
+
         $hasSlotPrices = $this->serverSlotPricingService->hasSlotPrices($product);
         $purchaseToken = $this->purchaseTokenService->generateToken($this->getUser(), 'buy');
+        $preparedEggs = $this->storeService->getProductEggs($product);
 
-        return $this->render('panel/cart/configure.html.twig', [
+        if (empty($preparedEggs)) {
+            $this->addFlash(
+                'danger',
+                $this->translator->trans('pteroca.store.product_configuration_unavailable')
+            );
+
+            return $this->redirectToRoute('panel', [
+                'routeName' => 'store_product',
+                'id' => $product->getId()
+            ]);
+        }
+
+        $requestData = $request->query->all();
+
+        $eggChoices = [];
+        foreach ($preparedEggs as $egg) {
+            $eggChoices[$egg['name']] = $egg['id'];
+        }
+
+        $priceChoices = [];
+        foreach ($product->getPrices() as $price) {
+            $priceChoices[$price->getId()] = $price->getId();
+        }
+
+        $initialData = [];
+        if (isset($requestData['egg'])) {
+            $initialData['egg'] = (int) $requestData['egg'];
+        }
+        if (isset($requestData['duration'])) {
+            $initialData['duration'] = (int) $requestData['duration'];
+        }
+        if (isset($requestData['slots'])) {
+            $initialData['slots'] = (int) $requestData['slots'];
+        }
+
+        $form = $this->createForm(ServerOrderType::class, $initialData, [
+            'product_id' => $product->getId(),
+            'eggs' => $eggChoices,
+            'prices' => $priceChoices,
+            'has_slot_prices' => $hasSlotPrices,
+            'initial_slots' => isset($requestData['slots']) ? (int) $requestData['slots'] : null,
+        ]);
+
+        $this->dispatchDataEvent(
+            CartConfigureDataLoadedEvent::class,
+            $request,
+            [$product->getId(), $preparedEggs, $hasSlotPrices]
+        );
+
+        $viewData = [
             'product' => $product,
             'eggs' => $preparedEggs,
-            'request' => $requestParams,
+            'form' => $form,
+            'request' => $requestData,
             'isProductAvailable' => $this->storeService->productHasNodeWithResources($product),
             'hasSlotPrices' => $hasSlotPrices,
-            'initialSlots' => $requestParams['slots'] ?? null,
+            'initialSlots' => $requestData['slots'] ?? null,
             'purchase_token' => $purchaseToken,
-        ]);
+        ];
+
+        return $this->renderWithEvent(ViewNameEnum::CART_CONFIGURE, 'panel/cart/configure.html.twig', $viewData, $request);
     }
 
     #[Route('/cart/buy', name: 'cart_buy', methods: ['POST'])]
@@ -121,29 +253,63 @@ class CartController extends AbstractController
         CreateServerService $createServerService,
     ): Response
     {
-        try {
-            $disableCsrf = isset($_ENV['DISABLE_CSRF']) && $_ENV['DISABLE_CSRF'] === 'true';
-            if (!$disableCsrf) {
-                $csrfToken = $request->request->get('_csrf_token');
-                if (!$this->csrfTokenManager->isTokenValid(new CsrfToken('submit', $csrfToken))) {
-                    throw new \Exception($this->translator->trans('pteroca.error.invalid_csrf_token'));
-                }
-            }
+        $this->denyAccessUnlessGranted(PermissionEnum::PURCHASE_SERVER->value);
 
+        try {
             $purchaseToken = $request->request->getString('purchase_token');
             $this->purchaseTokenService->validateAndConsumeToken($purchaseToken, $this->getUser(), 'buy');
 
             $product = $this->getProductByRequest($request);
-            $eggId = $request->request->getInt('egg');
-            $priceId = $request->request->getInt('duration');
-            $serverName = $request->request->getString('server-name');
-            $autoRenewal = $request->request->getBoolean('auto-renewal');
-            $slots = $request->request->get('slots') ? $request->request->getInt('slots') : null;
-            $voucherCode = $request->request->getString('voucher');
+            $hasSlotPrices = $this->serverSlotPricingService->hasSlotPrices($product);
+            $preparedEggs = $this->storeService->getProductEggs($product);
 
+            if (empty($preparedEggs)) {
+                throw new NotFoundHttpException(
+                    $this->translator->trans('pteroca.store.product_configuration_unavailable')
+                );
+            }
+
+            $eggChoices = [];
+            foreach ($preparedEggs as $egg) {
+                $eggChoices[$egg['name']] = $egg['id'];
+            }
+
+            $priceChoices = [];
+            foreach ($product->getPrices() as $price) {
+                $priceChoices[$price->getId()] = $price->getId();
+            }
+
+            $form = $this->createForm(ServerOrderType::class, null, [
+                'product_id' => $product->getId(),
+                'eggs' => $eggChoices,
+                'prices' => $priceChoices,
+                'has_slot_prices' => $hasSlotPrices,
+                'initial_slots' => null,
+            ]);
+
+            $form->handleRequest($request);
+
+            if (!$form->isSubmitted() || !$form->isValid()) {
+                $this->addFlash('danger', $this->translator->trans('pteroca.store.invalid_form_data'));
+                return $this->redirectToRoute('panel', ['routeName' => 'cart_configure', 'id' => $product->getId()]);
+            }
+
+            $formData = $form->getData();
+            $eggId = $form->get('egg')->getData();
+            $priceId = $form->get('duration')->getData();
+            $serverName = $formData['server-name'];
+            $autoRenewal = $formData['auto-renewal'] ?? false;
+            $slots = $formData['slots'] ?? null;
+            $voucher = $formData['voucher'] ?? '';
+
+            $this->dispatchDataEvent(
+                CartBuyRequestedEvent::class,
+                $request,
+                [$product->getId(), $eggId, $priceId, $serverName, $autoRenewal, $slots]
+            );
             $result = null;
             $this->entityManager->wrapInTransaction(function() use (
-                $product, $eggId, $priceId, $serverName, $autoRenewal, $slots, $voucherCode, $createServerService, &$result
+                $product, $eggId, $priceId, $serverName, $autoRenewal, $slots, $voucher, $createServerService, &$result
             ) {
                 $lockedUser = $this->userRepository->findOneByIdWithLock($this->getUser()->getId());
 
@@ -166,12 +332,11 @@ class CartController extends AbstractController
                     $serverName,
                     $autoRenewal,
                     $lockedUser,
-                    $voucherCode,
+                    $voucher,
                     $slots
                 );
             });
 
-            // Check if email was sent successfully
             if ($result && $result['emailError']) {
                 $this->addFlash('warning', $this->translator->trans($result['emailError']));
             }
@@ -201,24 +366,50 @@ class CartController extends AbstractController
         Request $request,
     ): Response
     {
+        $this->denyAccessUnlessGranted(PermissionEnum::RENEW_SERVER->value);
+
         $server = $this->getServerByRequest($request);
+
+        $this->dispatchDataEvent(
+            CartRenewPageAccessedEvent::class,
+            $request,
+            [$server->getId(), $server->getServerProduct()->getName()]
+        );
+
         $isOwner = $server->getUser() === $this->getUser();
         $hasSlotPrices = $this->serverSlotPricingService->hasSlotPricing($server);
+        $serverSlots = null;
 
         if ($hasSlotPrices) {
             $serverSlots = $this->serverSlotPricingService->getServerSlots($server);
         }
 
-        // Generate one-time purchase token to prevent double-submit
         $purchaseToken = $this->purchaseTokenService->generateToken($this->getUser(), 'renew');
 
-        return $this->render('panel/cart/renew.html.twig', [
+        $form = $this->createForm(ServerRenewType::class, null, [
+            'server_id' => $server->getId(),
+            'current_auto_renewal' => $server->isAutoRenewal(),
+            'is_owner' => $isOwner,
+            'has_slot_pricing' => $hasSlotPrices,
+            'server_slots' => $serverSlots,
+        ]);
+
+        $this->dispatchDataEvent(
+            CartRenewDataLoadedEvent::class,
+            $request,
+            [$server->getId(), $isOwner, $hasSlotPrices, $serverSlots]
+        );
+
+        $viewData = [
             'server' => $server,
+            'form' => $form,
             'isOwner' => $isOwner,
             'hasSlotPrices' => $hasSlotPrices,
             'serverSlots' => $serverSlots ?? null,
             'purchase_token' => $purchaseToken,
-        ]);
+        ];
+
+        return $this->renderWithEvent(ViewNameEnum::CART_RENEW, 'panel/cart/renew.html.twig', $viewData, $request);
     }
 
     #[Route('/cart/renew/buy', name: 'cart_renew_buy', methods: ['POST'])]
@@ -228,44 +419,66 @@ class CartController extends AbstractController
         RenewServerService $renewServerService,
     ): Response
     {
-        try {
-            $disableCsrf = isset($_ENV['DISABLE_CSRF']) && $_ENV['DISABLE_CSRF'] === 'true';
-            if (!$disableCsrf) {
-                $csrfToken = $request->request->get('_csrf_token');
-                if (!$this->csrfTokenManager->isTokenValid(new CsrfToken('submit', $csrfToken))) {
-                    throw new \Exception($this->translator->trans('pteroca.error.invalid_csrf_token'));
-                }
-            }
+        $this->denyAccessUnlessGranted(PermissionEnum::RENEW_SERVER->value);
 
+        try {
             $purchaseToken = $request->request->getString('purchase_token');
             $this->purchaseTokenService->validateAndConsumeToken($purchaseToken, $this->getUser(), 'renew');
 
             $server = $this->getServerByRequest($request);
-            $voucherCode = $request->request->getString('voucher');
+            $isOwner = $server->getUser() === $this->getUser();
 
-            $serverSlots = null;
             $hasActiveSlotPricing = $this->serverSlotPricingService->hasActiveSlotPricing($server);
+            $serverSlots = null;
             if ($hasActiveSlotPricing) {
                 $serverSlots = $this->serverSlotPricingService->getServerSlots($server);
             }
 
+            $form = $this->createForm(ServerRenewType::class, null, [
+                'server_id'            => $server->getId(),
+                'current_auto_renewal' => $server->isAutoRenewal(),
+                'is_owner'             => $isOwner,
+                'has_slot_pricing'     => $hasActiveSlotPricing,
+                'server_slots'         => $serverSlots,
+            ]);
+            $form->handleRequest($request);
+
+            if (!$form->isSubmitted() || !$form->isValid()) {
+                $this->addFlash('danger', $this->translator->trans('pteroca.store.invalid_form_data'));
+                return $this->redirectToRoute('panel', ['routeName' => 'cart_renew', 'id' => $server->getId()]);
+            }
+
+            $formData   = $form->getData();
+            $voucherCode = $formData['voucher'] ?? $request->request->getString('voucher', '');
+
+            $this->dispatchDataEvent(
+                CartRenewBuyRequestedEvent::class,
+                $request,
+                [$server->getId(), $voucherCode ?: null, $serverSlots]
+            );
+
+            $this->storeService->validateBoughtProduct(
+                $server->getServerProduct(),
+                null,
+                $server->getServerProduct()->getSelectedPrice()->getId(),
+                $server,
+                $serverSlots,
+            );
+
             $result = null;
-            $this->entityManager->wrapInTransaction(function() use (
-                $server, $voucherCode, $serverSlots, $renewServerService, &$result
+            $this->entityManager->wrapInTransaction(function () use (
+                $server,
+                $isOwner,
+                $formData,
+                $voucherCode,
+                $serverSlots,
+                $renewServerService,
+                &$result
             ) {
                 $lockedUser = $this->userRepository->findOneByIdWithLock($this->getUser()->getId());
-
                 if (!$lockedUser) {
                     throw new \Exception($this->translator->trans('pteroca.error.user_not_found'));
                 }
-
-                $this->storeService->validateBoughtProduct(
-                    $server->getServerProduct(),
-                    null,
-                    $server->getServerProduct()->getSelectedPrice()->getId(),
-                    $server,
-                    $serverSlots,
-                );
 
                 $result = $renewServerService->renewServer(
                     $server,
@@ -273,10 +486,14 @@ class CartController extends AbstractController
                     $voucherCode,
                     $serverSlots,
                 );
+
+                if ($isOwner && array_key_exists('auto-renewal', $formData)) {
+                    $server->setAutoRenewal(($formData['auto-renewal'] ?? '') === '1');
+                    $this->serverRepository->save($server);
+                }
             });
 
-            // Check if email was sent successfully
-            if ($result && $result['emailError']) {
+            if (is_array($result) && !empty($result['emailError'])) {
                 $this->addFlash('warning', $this->translator->trans($result['emailError']));
             }
 
@@ -313,7 +530,7 @@ class CartController extends AbstractController
             throw $this->createNotFoundException($this->translator->trans('pteroca.store.product_not_found'));
         }
 
-        $isOwner = $server->getUser() === $this->getUser() || $this->isGranted(UserRoleEnum::ROLE_ADMIN->value);
+        $isOwner = $server->getUser() === $this->getUser() || $this->isGranted(PermissionEnum::ACCESS_SERVERS->value);
         if ($isOwner) {
             return $server;
         }

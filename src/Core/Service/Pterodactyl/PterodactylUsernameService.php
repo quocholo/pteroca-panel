@@ -2,10 +2,10 @@
 
 namespace App\Core\Service\Pterodactyl;
 
-class PterodactylUsernameService
+readonly class PterodactylUsernameService
 {
     public function __construct(
-        private readonly PterodactylService $pterodactylService,
+        private PterodactylApplicationService $pterodactylApplicationService,
     ) {}
 
     public function generateUsername(string $username): string
@@ -15,9 +15,12 @@ class PterodactylUsernameService
             $username = explode('+', $username)[0];
         }
 
-        $user = $this->pterodactylService->getApi()->users->all(['filter' => ['username' => $username]])->toArray();
+        $users = $this->pterodactylApplicationService
+            ->getApplicationApi()
+            ->users()
+            ->getAllUsers(['filter' => ['username' => $username]]);
 
-        if (!empty($user)) {
+        if (!$users->isEmpty()) {
             $username = sprintf('%s%d', $username, rand(1, 999));
             return $this->generateUsername($username);
         }

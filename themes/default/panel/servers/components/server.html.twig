@@ -7,12 +7,12 @@
             </a>
             <div class="position-absolute top-0 end-0 m-2">
                 {% if not server.isSuspended %}
-                    <span class="badge bg-success rounded-pill px-3 py-2 shadow-sm">
+                    <span class="badge badge-success px-3 py-2 shadow-sm">
                         <i class="fas fa-check-circle me-1"></i>
                         {{ 'pteroca.servers.active'|trans }}
                     </span>
                 {% else %}
-                    <span class="badge bg-warning text-white rounded-pill px-3 py-2 shadow-sm">
+                    <span class="badge badge-warning px-3 py-2 shadow-sm">
                         <i class="fas fa-pause-circle me-1"></i>
                         {{ 'pteroca.servers.suspended'|trans }}
                     </span>
@@ -34,13 +34,12 @@
             {% if server.imagePath is not defined or not server.imagePath %}
                 <div class="mt-2">
                     {% if not server.isSuspended %}
-                        <span class="badge bg-success-subtle rounded-pill px-3 py-2">
-                            <i class="fas fa-check-circle me-1"></i>
+                        <span class="badge badge-success">
                             {{ 'pteroca.servers.active'|trans }}
                         </span>
-                        <span class="badge placeholder rounded-pill px-3 py-2" data-state></span>
+                        <span class="badge placeholder" data-state></span>
                     {% else %}
-                        <span class="badge bg-warning text-white rounded-pill px-3 py-2">
+                        <span class="badge badge-warning">
                             <i class="fas fa-pause-circle me-1"></i>
                             {{ 'pteroca.servers.suspended'|trans }}
                         </span>
@@ -113,7 +112,7 @@
                 {% if not server.isSuspended %}
                     <div class="col-6">
                         <a href="{% if not use_pterodactyl_panel_as_client_panel() %}{{ path('panel', { routeName: 'server', id: server.pterodactylServerIdentifier }) }}{% else %}{{ get_pterodactyl_panel_url('/server/' ~ server.pterodactylServerIdentifier) }}{% endif %}"
-                           class="btn btn-primary w-100 d-flex align-items-center justify-content-center"
+                           class="btn primary w-100 d-flex align-items-center justify-content-center p-3"
                            target="{% if use_pterodactyl_panel_as_client_panel() %}_blank{% else %}_self{% endif %}">
                             <i class="fas fa-cogs me-2"></i>
                             <span>{{ 'pteroca.servers.manage_server'|trans }}</span>
@@ -121,7 +120,7 @@
                     </div>
                     <div class="col-6">
                         <a href="{{ path('panel', { routeName: 'cart_renew', id: server.id }) }}" 
-                           class="btn btn-secondary w-100 d-flex align-items-center justify-content-center">
+                           class="btn secondary w-100 d-flex align-items-center justify-content-center">
                             <i class="fas fa-sync me-2"></i>
                             <span>{{ 'pteroca.servers.extend'|trans }}</span>
                         </a>
@@ -129,7 +128,7 @@
                 {% else %}
                     <div class="col-12">
                         <a href="{{ path('panel', { routeName: 'cart_renew', id: server.id }) }}" 
-                           class="btn btn-secondary w-100 d-flex align-items-center justify-content-center">
+                           class="btn secondary w-100 d-flex align-items-center justify-content-center">
                             <i class="fas fa-sync me-2"></i>
                             <span>{{ 'pteroca.servers.extend'|trans }}</span>
                         </a>

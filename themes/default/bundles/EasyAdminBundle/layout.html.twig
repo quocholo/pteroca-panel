@@ -20,6 +20,7 @@
     </title>
 
     {% block head_stylesheets %}
+        <link rel="stylesheet" href="{{ template_asset('fonts/fonts.css') }}">
         <link rel="stylesheet" href="{{ asset('app.css', ea.assets.defaultAssetPackageName) }}">
         {% if get_current_template_options().isSupportCustomColors() %}
             {% include 'components/theme_styles.html.twig' %}
@@ -71,10 +72,6 @@
     {% endblock javascript_page_color_scheme %}
 
     {% block wrapper_wrapper %}
-        {% block flash_messages %}
-            {{ include(ea.templatePath('flash_messages')) }}
-        {% endblock flash_messages %}
-
         {% set user_menu_avatar %}
             {% if ea.user.avatarPath is null %}
                 <span class="user-avatar me-2 mb-1">
@@ -176,11 +173,31 @@
                                 </a>
                             </li>
                             <li>
-                                <a href="#" class="dropdown-item dropdown-appearance-item active" data-ea-color-scheme="auto">
+                                <a href="#" class="dropdown-item dropdown-appearance-item" data-ea-color-scheme="auto">
                                     <i class="fas fa-desktop fa-fw"></i>
                                     {{ 'settings.appearance.auto'|trans(domain = 'EasyAdminBundle') }}
                                 </a>
                             </li>
+                        {% endif %}
+
+                        {# Plugin settings menu items #}
+                        {% if settings_menu_items is defined and settings_menu_items|length > 0 %}
+                            <div class="dropdown-divider"></div>
+
+                            {% for item in settings_menu_items %}
+                                {% if item.type == 'divider' %}
+                                    <div class="dropdown-divider"></div>
+                                {% elseif item.type == 'header' %}
+                                    <li class="dropdown-header">{{ item.label|trans }}</li>
+                                {% else %}
+                                    <li>
+                                        <a href="{{ item.url }}" class="dropdown-item {{ item.css_class }}" {% for attr, value in item.data_attributes %}{{ attr }}="{{ value }}" {% endfor %}>
+                                            {% if item.icon %}<i class="{{ item.icon }} fa-fw"></i>{% endif %}
+                                            {{ item.label|trans }}
+                                        </a>
+                                    </li>
+                                {% endif %}
+                            {% endfor %}
                         {% endif %}
                     </ul>
                 </div>
@@ -313,14 +330,14 @@
                                 </div>
                             {% endblock search_wrapper %}
 
-                            <div class="navbar-custom-menu">
-                                <div class="user-balance me-4">
-                                    <a href="{{ path('panel', { routeName: 'recharge_balance' }) }}">
-                                        <i class="fas fa-coins"></i>
-                                        {{ app.user.balance|number_format(2, ',', ' ')}} {{ get_currency() }}
-                                    </a>
+                            {# Navbar widgets - can be extended by plugins #}
+                            {% if navbar_widgets is defined and navbar_widgets is not empty %}
+                                <div class="navbar-custom-menu">
+                                    {% for widget in navbar_widgets %}
+                                        {{ include(widget.getTemplate(), widget.getData(widget.getSupportedContexts()[0], {'user': app.user})) }}
+                                    {% endfor %}
                                 </div>
-                            </div>
+                            {% endif %}
 
                             {% block header_custom_menu_wrapper %}
                                 <div class="navbar-custom-menu">
@@ -345,11 +362,12 @@
                         {% endblock content_top_header %}
                     </aside>
 
-                    {% if show_email_verification_alert() and not app.user.verified %}
-                        <div class="col-12">
-                            <div class="alert alert-warning alert-dismissible fade show" role="alert">
-                                <strong>{{ 'pteroca.system.email_not_verified'|trans }} <a href="{{ path('verify_notice') }}">{{ 'pteroca.system.or_resend_verification_email'|trans }}</a></strong>
-                            </div>
+                    {% set flash_messages_peek = app.session.flashbag.peekAll() %}
+                    {% if flash_messages_peek|length > 0 %}
+                        <div class="content-wrapper alerts-wrapper d-block pb-0 pt-3">
+                            {% block flash_messages %}
+                                {{ include(ea.templatePath('flash_messages')) }}
+                            {% endblock %}
                         </div>
                     {% endif %}
 
@@ -397,6 +415,20 @@
 
                         <div id="content-resizer-handler" class="resizer-handler resizer-handler-right"></div>
                     </div>
+
+                    {% block global_footer %}
+                        <footer class="global-footer">
+                            <div class="global-footer-content">
+                                <p class="text-muted small mb-0">
+                                    Powered by
+                                    <a href="https://pteroca.com" target="_blank" class="text-muted text-decoration-none">
+                                        PteroCA v{{ get_app_version() }}
+                                    </a>
+                                    &copy; {{ 'now'|date('Y') }}
+                                </p>
+                            </div>
+                        </footer>
+                    {% endblock global_footer %}
                 </section>
             {% endblock wrapper %}
         </div>

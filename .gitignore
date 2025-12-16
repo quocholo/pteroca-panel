@@ -8,6 +8,8 @@
 /public/bundles/
 /public/uploads/**/*
 !public/uploads/**/.gitkeep
+/public/plugins/**/*
+!public/plugins/.gitkeep
 /var/
 /vendor/
 /.idea
@@ -27,3 +29,14 @@ junit.xml
 ###> phpstan/phpstan ###
 phpstan.neon
 ###< phpstan/phpstan ###
+
+###> pteroca/plugin-system ###
+# Ignore plugin contents but track the structure
+/plugins/*/
+!plugins/.gitkeep
+###< pteroca/plugin-system ###
+
+###> custom ###
+CLAUDE.md
+docs/
+###< custom ###
