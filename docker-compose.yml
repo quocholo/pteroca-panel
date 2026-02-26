@@ -22,7 +22,7 @@ services:
     container_name: pteroca_phpmyadmin_dev
     restart: always
     ports:
-      - "8080:80"
+      - "3080:80"
     environment:
       PMA_HOST: db
       PMA_USER: root
