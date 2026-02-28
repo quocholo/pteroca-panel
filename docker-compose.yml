@@ -3,6 +3,8 @@ services:
     image: mysql:8.0
     container_name: pteroca_mysql_dev
     restart: always
+    ports:
+      - "3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: pteroca
@@ -20,7 +22,7 @@ services:
     container_name: pteroca_phpmyadmin_dev
     restart: always
     ports:
-      - 80
+      - "3080:80"
     environment:
       PMA_HOST: db
       PMA_USER: root
@@ -39,7 +41,7 @@ services:
         APP_ENV: dev
     container_name: pteroca_web_dev
     ports:
-      - 8000
+      - "8000:8000"
     environment:
       DATABASE_URL: "mysql://user:password@db:3306/pteroca?serverVersion=8.0"
       APP_ENV: dev
