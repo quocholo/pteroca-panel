@@ -48,7 +48,7 @@ services:
       CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
     depends_on:
-      db:
+      db_pteroca:
         condition: service_healthy
     volumes:
       - app_var_dev:/app/var
