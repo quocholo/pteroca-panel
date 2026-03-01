@@ -1,5 +1,5 @@
 services:
-  db:
+  db_pteroca:
     image: mysql:8.0
     container_name: pteroca_mysql_dev
     restart: always
@@ -24,7 +24,7 @@ services:
     ports:
       - "3080:80"
     environment:
-      PMA_HOST: db
+      PMA_HOST: db_pteroca
       PMA_USER: root
       PMA_PASSWORD: root
       # Increase upload limits for database imports
@@ -32,9 +32,9 @@ services:
       MAX_EXECUTION_TIME: 300
       MEMORY_LIMIT: 512M
     depends_on:
-      - db
+      - db_pteroca
 
-  web:
+  web_pteroca:
     build: 
       context: .
       args:
@@ -43,7 +43,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: "mysql://user:password@db:3306/pteroca?serverVersion=8.0"
+      DATABASE_URL: "mysql://user:password@db_pteroca:3306/pteroca?serverVersion=8.0"
       APP_ENV: dev
       CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
